@@ -1,0 +1,62 @@
+---
+title: "Interprocess: Cross-Platform IPC Library for Rust"
+sidebarTitle: "Introduction"
+description: "Interprocess is a Rust IPC library providing local sockets, unnamed pipes, FIFO files, and Windows named pipes with a unified cross-platform API."
+---
+
+Interprocess is a Rust library for inter-process communication (IPC) that aims to expose as many platform-specific features as possible while maintaining a uniform interface across all supported platforms. Rather than reaching for `localhost` TCP sockets — which carry the overhead of the full network stack and require a port number — Interprocess provides primitives that speak directly to the OS IPC layer, yielding better performance and developer-friendly identifiers. It runs on **Windows**, **Linux**, **macOS**, and all generic Unix-like systems (FreeBSD, Android, OpenBSD, NetBSD, and more), making it a practical foundation for portable, cross-platform IPC code.
+
+<CardGroup cols={2}>
+  <Card title="Local Sockets" icon="plug" href="/concepts/local-sockets">
+    The flagship primitive: a socket-like API backed by Unix domain sockets on Unix and named pipes on Windows, with a single portable interface.
+  </Card>
+  <Card title="Unnamed Pipes" icon="arrow-right-arrow-left" href="/concepts/unnamed-pipes">
+    Low-level byte-stream pipes for parent–child process communication when `std::process` pipes are not enough.
+  </Card>
+  <Card title="Async / Tokio" icon="bolt" href="/concepts/async-tokio">
+    Native async support for local sockets and Windows named pipes via an optional Tokio feature gate.
+  </Card>
+  <Card title="Platform Support" icon="globe" href="/concepts/platform-support">
+    Five tiers of platform support covering Windows, Linux, macOS, the BSDs, Android, and every other `#[cfg(unix)]` target the `libc` crate reaches.
+  </Card>
+</CardGroup>
+
+## Communication Primitives
+
+Interprocess provides both cross-platform abstractions and OS-specific interfaces. The right primitive depends on what you need to accomplish:
+
+<CardGroup cols={2}>
+  <Card title="Local Sockets" icon="plug">
+    **Flagship feature.** A much more appropriate alternative to `localhost` TCP sockets, featuring better performance and developer- and user-friendly identifiers and authentication. Backed by Unix domain sockets on Unix/macOS and Windows named pipes on Windows. Start here if you are unsure which primitive to use.
+  </Card>
+  <Card title="Unnamed Pipes" icon="arrow-right-arrow-left">
+    Classic byte-stream pipes useful when the pipes created by [`std::process`](https://doc.rust-lang.org/std/process/index.html) are insufficient. Available cross-platform and composable with the standard `Read`/`Write` traits.
+  </Card>
+  <Card title="FIFO Files" icon="file" >
+    **Unix only.** Named pipes in the filesystem (`mkfifo`). Of marginal utility outside of shell scripting, but necessary when communicating with programs that insist on using them. Found under `interprocess::os::unix::fifo_file`.
+  </Card>
+  <Card title="Windows Named Pipes" icon="windows">
+    **Windows only.** The conventional Windows counterpart to Unix domain sockets; also the underlying implementation of local sockets on Windows. Found under `interprocess::os::windows::named_pipe`.
+  </Card>
+</CardGroup>
+
+## Async Support
+
+Interprocess supports asynchronous I/O through an optional **`tokio`** feature gate. Enabling it unlocks async-native variants of local sockets and Windows named pipes that integrate directly with the Tokio runtime's event loop, letting the OS notify your task when the socket is ready rather than requiring dedicated blocking threads.
+
+```toml
+[dependencies]
+interprocess = { version = "2.4.4", features = ["tokio"] }
+```
+
+The async types live under `interprocess::local_socket::tokio` and are brought into scope via `interprocess::local_socket::tokio::prelude::*`. Note that **only Tokio is currently supported** — the async types will panic if polled outside a Tokio runtime context. Support for other runtimes such as `smol` is desirable but not yet being actively developed.
+
+## License
+
+`interprocess` is dual-licensed under your choice of the **0-clause BSD license** or the **Apache 2.0 license**. The 0BSD license has no conditions whatsoever, making this functionally equivalent to placing the software in the public domain — while still being legally valid in jurisdictions such as Germany that prohibit authors from voluntarily dedicating works to the public domain. The Apache 2.0 option additionally confers a patent grant protecting users.
+
+In short: you can use, modify, and redistribute `interprocess` without restriction.
+
+<Note>
+  Not sure where to start? Head straight to [Local Sockets](/concepts/local-sockets) — it is the primitive you are looking for in the vast majority of IPC use cases. If you need async support for handling multiple clients concurrently, see the [Async / Tokio guide](/concepts/async-tokio).
+</Note>

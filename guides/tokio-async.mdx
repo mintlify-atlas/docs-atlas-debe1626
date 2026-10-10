@@ -1,0 +1,299 @@
+---
+title: "Async Local Sockets with Tokio and Interprocess"
+sidebarTitle: "Tokio Async"
+description: "Build a concurrent async local socket server and client using the Tokio feature in Interprocess, handling multiple connections without spawning OS threads."
+---
+
+The synchronous API handles one client at a time on a single thread — straightforward, but limiting. When you need to serve many clients concurrently without paying the cost of one OS thread per connection, Interprocess's Tokio integration is the answer. The async API mirrors the synchronous API almost exactly, with `async`/`await` sprinkled in and `tokio::spawn` used in place of threads.
+
+## Enable the Feature
+
+The Tokio integration is gated behind a Cargo feature flag. Add it to `Cargo.toml`:
+
+```toml
+[dependencies]
+interprocess = { version = "2", features = ["tokio"] }
+tokio = { version = "1", features = ["full"] }
+```
+
+## Building the Async Server
+
+<Steps>
+  <Step title="Import from the Tokio prelude">
+    The async listener and stream types live under `local_socket::tokio`. The prelude re-exports the traits you need:
+
+    ```rust
+    use interprocess::local_socket::{
+        tokio::{prelude::*, Stream},
+        GenericNamespaced, ListenerOptions,
+    };
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        try_join,
+    };
+    ```
+  </Step>
+
+  <Step title="Create the listener with create_tokio()">
+    The only difference from the synchronous path is calling `create_tokio()` instead of `create_sync()`:
+
+    ```rust
+    let name = "example.sock".to_ns_name::<GenericNamespaced>()?;
+
+    let listener = match ListenerOptions::new().name(name).create_tokio() {
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+            eprintln!("Socket already in use — is another instance running?");
+            return Err(e.into());
+        }
+        x => x?,
+    };
+    ```
+  </Step>
+
+  <Step title="Accept connections with listener.accept().await">
+    Unlike the synchronous `.incoming()` iterator, the async server uses an explicit `loop` with `.accept().await`:
+
+    ```rust
+    loop {
+        let conn = match listener.accept().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Incoming connection error: {e}");
+                continue;
+            }
+        };
+        // spawn a task per connection
+    }
+    ```
+  </Step>
+
+  <Step title="Spawn a Tokio task per connection">
+    Move each accepted connection into a `tokio::spawn` call so the loop can immediately go back to accepting the next client:
+
+    ```rust
+    tokio::spawn(async move {
+        if let Err(e) = handle_conn(conn).await {
+            eprintln!("Error while handling connection: {e}");
+        }
+    });
+    ```
+  </Step>
+
+  <Step title="Use try_join! for concurrent send and receive">
+    Because the async stream implements both `AsyncRead` and `AsyncWrite` through shared references, you can borrow it twice and run send and receive truly concurrently with `try_join!`:
+
+    ```rust
+    async fn handle_conn(conn: Stream) -> io::Result<()> {
+        let mut recver = BufReader::new(&conn);
+        let mut sender = &conn;
+
+        let mut buffer = String::with_capacity(128);
+
+        let send = sender.write_all(b"Hello from server!\n");
+        let recv = recver.read_line(&mut buffer);
+
+        try_join!(recv, send)?;
+
+        drop(conn);
+        print!("Client answered: {buffer}");
+        Ok(())
+    }
+    ```
+
+    `try_join!` polls both futures concurrently and returns as soon as one of them resolves to an error, or when both have succeeded.
+  </Step>
+</Steps>
+
+## Full Async Server Example
+
+```rust
+use {
+    interprocess::local_socket::{
+        tokio::{prelude::*, Stream},
+        GenericNamespaced, ListenerOptions,
+    },
+    std::io,
+    tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        try_join,
+    },
+};
+
+async fn handle_conn(conn: Stream) -> io::Result<()> {
+    let mut recver = BufReader::new(&conn);
+    let mut sender = &conn;
+
+    let mut buffer = String::with_capacity(128);
+
+    let send = sender.write_all(b"Hello from server!\n");
+    let recv = recver.read_line(&mut buffer);
+
+    try_join!(recv, send)?;
+
+    // Avoid holding up resources.
+    drop(conn);
+
+    // read_line keeps the line feed at the end.
+    print!("Client answered: {buffer}");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let printname = "example.sock";
+    let name = printname.to_ns_name::<GenericNamespaced>()?;
+
+    let listener = match ListenerOptions::new().name(name).create_tokio() {
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+            // When a program that uses a file-type socket name terminates
+            // its socket server without deleting the file, a "corpse socket"
+            // remains, which can neither be connected to nor reused by a new
+            // listener. Normally, Interprocess takes care of this on affected
+            // platforms by deleting the socket file when the listener is
+            // dropped. (This is vulnerable to all sorts of races and thus can
+            // be disabled.)
+            //
+            // In a real program, instead of leaving it up to the user
+            // to perform cleanup, one would use the .try_overwrite(true)
+            // listener option to try to replace the socket.
+            eprintln!(
+                "Error: could not start server because the socket file is \
+                occupied. Please check if {printname} is in use by another \
+                process and try again."
+            );
+            return Err(e.into());
+        }
+        x => x?,
+    };
+
+    // This is a good place to inform clients that the server is ready.
+    eprintln!("Server running at {printname}");
+
+    loop {
+        let conn = match listener.accept().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("There was an error with an incoming connection: {e}");
+                continue;
+            }
+        };
+
+        // Spawn new parallel asynchronous tasks onto the Tokio runtime and
+        // hand the connection over to them so that multiple clients could be
+        // processed simultaneously in a lightweight fashion.
+        tokio::spawn(async move {
+            // The outer match processes errors that happen when we're
+            // connecting to something. The inner if-let processes errors
+            // that happen during the connection.
+            if let Err(e) = handle_conn(conn).await {
+                eprintln!("Error while handling connection: {e}");
+            }
+        });
+    }
+}
+```
+
+## Building the Async Client
+
+<Steps>
+  <Step title="Import from the Tokio prelude">
+    The client needs the same imports as the server, minus the listener:
+
+    ```rust
+    use interprocess::local_socket::{
+        tokio::{prelude::*, Stream},
+        GenericFilePath, GenericNamespaced,
+    };
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        try_join,
+    };
+    ```
+  </Step>
+
+  <Step title="Connect with Stream::connect(name).await">
+    The async `connect` is an `.await`-able method on the Tokio `Stream` type:
+
+    ```rust
+    let conn = Stream::connect(name).await?;
+    ```
+  </Step>
+
+  <Step title="Run send and receive concurrently">
+    Borrow the connection twice — once for the `BufReader` wrapper and once as the write side — then drive both with `try_join!`:
+
+    ```rust
+    let mut recver = BufReader::new(&conn);
+    let mut sender = &conn;
+
+    let send = sender.write_all(b"Hello from client!\n");
+    let recv = recver.read_line(&mut buffer);
+
+    try_join!(send, recv)?;
+    ```
+  </Step>
+</Steps>
+
+## Full Async Client Example
+
+```rust
+use {
+    interprocess::local_socket::{
+        tokio::{prelude::*, Stream},
+        GenericFilePath, GenericNamespaced,
+    },
+    tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        try_join,
+    },
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let name = if GenericNamespaced::is_supported() {
+        "example.sock".to_ns_name::<GenericNamespaced>()?
+    } else {
+        "/tmp/example.sock".to_fs_name::<GenericFilePath>()?
+    };
+
+    let mut buffer = String::with_capacity(128);
+
+    let conn = Stream::connect(name).await?;
+
+    // Create a buffered reader that wraps the connection by reference
+    // so we can receive a single line.
+    let mut recver = BufReader::new(&conn);
+    // The "sender" will just be a shared reference to the connection,
+    // allowing us to read and write concurrently. It is okay to ditch
+    // this reference and reborrow it at any time to satisfy the borrow
+    // check.
+    let mut sender = &conn;
+
+    let send = sender.write_all(b"Hello from client!\n");
+    let recv = recver.read_line(&mut buffer);
+
+    try_join!(send, recv)?;
+
+    // Avoid holding up resources.
+    drop(recver);
+    drop(conn);
+
+    // read_line keeps the line feed at the end.
+    print!("Server answered: {buffer}");
+    Ok(())
+}
+```
+
+## Key Differences from the Synchronous API
+
+| Aspect | Synchronous | Tokio async |
+|---|---|---|
+| Listener creation | `create_sync()` | `create_tokio()` |
+| Accepting connections | `.incoming()` iterator | `listener.accept().await` in a loop |
+| Concurrent clients | Threads | `tokio::spawn` |
+| Concurrent send/recv | Not possible on one stream | `try_join!` with shared refs |
+| Import prefix | `local_socket::prelude::*` | `local_socket::tokio::prelude::*` |
+
+<Warning>
+  The Tokio async types in Interprocess use Tokio's I/O infrastructure internally and will **panic** if used outside of a Tokio runtime. Always run async code inside `#[tokio::main]` or an explicit `tokio::runtime::Runtime`. Do not attempt to call `.await` on these types from a synchronous context.
+</Warning>

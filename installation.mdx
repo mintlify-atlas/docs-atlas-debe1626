@@ -1,0 +1,70 @@
+---
+title: "Installing Interprocess in Your Rust Project"
+sidebarTitle: "Installation"
+description: "Add Interprocess to your Rust project via Cargo. Learn about the tokio async feature gate, MSRV requirements, and platform-specific dependency setup."
+---
+
+`interprocess` is published on [crates.io](https://crates.io/crates/interprocess) and is installed the standard Cargo way — no system libraries or pre-built binaries required. All platform-specific dependencies are pure-Rust or automatically pulled in by Cargo based on your target platform. **Rust 1.75 or later is required.**
+
+## Basic Installation
+
+Add `interprocess` to the `[dependencies]` section of your `Cargo.toml`:
+
+```toml
+[dependencies]
+interprocess = "2.4.4"
+```
+
+To also enable the optional async Tokio integration, include the `tokio` feature flag:
+
+```toml
+[dependencies]
+interprocess = { version = "2.4.4", features = ["tokio"] }
+```
+
+After editing `Cargo.toml`, run `cargo build` (or `cargo check`) to fetch and compile the crate and its dependencies.
+
+## Feature Flags
+
+Interprocess keeps its default dependency footprint minimal. All optional capabilities are gated behind explicit feature flags.
+
+| Feature | Default | Description |
+|---|---|---|
+| `tokio` | Off | Enables async-native local sockets and Windows named pipes backed by the [Tokio](https://crates.io/crates/tokio) runtime. Pulls in `tokio` (with `sync`, `rt`, `net`, `time`, `io-util`, and `macros` sub-features) as a dependency. |
+| `async` | Off | Internal feature that enables the `futures-core` dependency. It is pulled in automatically by `tokio` and is **not intended for direct use**. |
+| `doc_cfg` | Off | Enables the nightly-only `doc(cfg(...))` attribute annotations that annotate platform-specific items in the rendered documentation. Only useful for documentation builds (e.g. docs.rs builds); do not enable in normal projects. |
+
+Enable features by listing them in your dependency declaration:
+
+```toml
+# Sync only (default)
+interprocess = "2.4.4"
+
+# With async Tokio support
+interprocess = { version = "2.4.4", features = ["tokio"] }
+```
+
+## MSRV
+
+`interprocess` requires **Rust 1.75 or later**. The crate targets stable Rust — no nightly compiler is needed for any of the non-documentation features. The `doc_cfg` feature is the sole exception: it requires a nightly compiler and is intended only for documentation tooling.
+
+If you are using a Rust toolchain older than 1.75, upgrade with:
+
+```bash
+rustup update stable
+```
+
+## Platform-Specific Dependencies
+
+Cargo selects the correct platform-specific dependencies automatically based on your compilation target — you do not need to configure anything manually.
+
+| Platform | Dependencies pulled in |
+|---|---|
+| **Windows** | [`windows-sys`](https://crates.io/crates/windows-sys) (Win32 API bindings), [`widestring`](https://crates.io/crates/widestring) (UTF-16 string handling), [`recvmsg`](https://crates.io/crates/recvmsg) |
+| **Unix / Linux / macOS** | [`libc`](https://crates.io/crates/libc) (POSIX system call bindings) |
+
+These are declared under `[target.'cfg(windows)'.dependencies]` and `[target.'cfg(unix)'.dependencies]` in `interprocess`'s own `Cargo.toml`, so Cargo resolves them transparently during a normal `cargo build`.
+
+<Tip>
+  Enable the `tokio` feature if your server needs to handle multiple clients concurrently. Tokio's async I/O model lets a single thread service many connections at once without the overhead of spawning a dedicated OS thread per client — a significant advantage for high-connection-count servers.
+</Tip>

@@ -1,0 +1,171 @@
+---
+title: "Local Socket Name Types and Platform Dispatch"
+sidebarTitle: "Name Types"
+description: "Learn how Interprocess name types like GenericFilePath and GenericNamespaced determine which underlying IPC primitive is used on each platform."
+---
+
+Name types in Interprocess determine which underlying IPC primitive is selected at the point where
+you construct a `Name` value. The mapping from a name type and an input string to a concrete
+OS-level socket identifier is **stable across minor and patch versions** — if a name works today it
+will resolve to the same thing within the current major version of the crate.
+
+## The `NameType` Trait
+
+`NameType` is a **sealed trait** implemented by uninhabited (zero-variant enum) tag types. Because
+it is sealed, you cannot implement it outside of Interprocess itself. The tag types are used only as
+generic arguments; you never construct or store them.
+
+```rust
+// NameType is sealed — cannot be implemented outside of Interprocess
+pub trait NameType: Copy + std::fmt::Debug + Eq + Send + Sync + Unpin {
+    /// Whether this name type is supported by the current OS / runtime environment.
+    fn is_supported() -> bool;
+}
+```
+
+`NameType` has two sub-traits that split path-based and namespace-based naming:
+
+| Sub-trait              | Paired conversion trait | Purpose                                         |
+|------------------------|-------------------------|-------------------------------------------------|
+| `PathNameType<S>`      | `ToFsName`              | Maps a filesystem path to a `Name`              |
+| `NamespacedNameType<S>` | `ToNsName`             | Maps an arbitrary string to a namespaced `Name` |
+
+The generic parameter `S` is the unsized string type being mapped (`OsStr` or `CStr`).
+
+## `GenericFilePath`
+
+`GenericFilePath` implements `PathNameType` and is designed to be **always supported on every
+platform**. It maps filesystem paths to the most natural socket primitive available:
+
+<Accordion title="Platform-specific behavior">
+
+**Windows** — Paths that begin with `\\.\pipe\` are passed through verbatim to a named pipe. Any
+other path (including `\\?\` normalization-bypassing paths) currently returns an error.
+
+**Unix** — Passed through verbatim as a filesystem path to a Unix domain socket. No prefix is
+added or removed.
+
+</Accordion>
+
+### Usage
+
+```rust
+use interprocess::local_socket::{GenericFilePath, ToFsName};
+
+// Unix: opens/creates a Unix domain socket at /tmp/my-app.sock
+// Windows: the path must start with \\.\pipe\
+let name = "/tmp/my-app.sock".to_fs_name::<GenericFilePath>()?;
+```
+
+On Windows you would instead write:
+
+```rust
+use interprocess::local_socket::{GenericFilePath, ToFsName};
+
+let name = r"\\.\pipe\my-app".to_fs_name::<GenericFilePath>()?;
+```
+
+## `GenericNamespaced`
+
+`GenericNamespaced` implements `NamespacedNameType` and is likewise **always supported on every
+platform**. Rather than requiring a well-formed path, it accepts an arbitrary application-chosen
+string and performs the smallest transformation required by each platform:
+
+<Accordion title="Platform-specific behavior">
+
+**Windows** — Prepends `\\.\pipe\` to the provided string, producing a local named pipe path.
+
+**Linux (including Android)** — Resolves to the [abstract namespace](https://man7.org/linux/man-pages/man7/unix.7.html)
+with no transformation. Because the abstract namespace uses a 108-byte `sun_path` field with the
+first byte reserved as a NUL sentinel, the usable name length is **at most 107 bytes**.
+
+**Other Unix** — Prepends `/tmp/` to produce a filesystem socket path. This means a filesystem
+entry is created and must be cleaned up (Interprocess handles this on listener drop).
+
+</Accordion>
+
+### Usage
+
+```rust
+use interprocess::local_socket::{GenericNamespaced, ToNsName};
+
+// Linux: abstract socket @my-app.sock (no filesystem entry)
+// macOS/FreeBSD/OpenBSD: /tmp/my-app.sock
+// Windows: \\.\pipe\my-app.sock
+let name = "my-app.sock".to_ns_name::<GenericNamespaced>()?;
+```
+
+## Choosing a Name Type
+
+| Scenario | Recommended type |
+|---|---|
+| Cross-platform application with no path requirements | `GenericNamespaced` |
+| Linux service that must not leave socket files behind | `GenericNamespaced` |
+| You need to control the exact socket path on disk | `GenericFilePath` |
+| Windows named pipe at a custom path | `GenericFilePath` (path must start with `\\.\pipe\`) |
+| Interoperability with another program using a fixed path | `GenericFilePath` |
+
+<Note>
+  On Linux, `GenericNamespaced` uses the abstract socket namespace, meaning **no filesystem entry
+  is ever created**. This avoids the need to delete stale socket files after a crash and removes
+  filesystem-permission concerns from the equation entirely.
+</Note>
+
+## The `is_supported()` Method
+
+Every `NameType` implementor exposes a static method:
+
+```rust
+fn is_supported() -> bool
+```
+
+Both `GenericFilePath` and `GenericNamespaced` always return `true` because they are designed to
+work on every platform interprocess supports. If you are using a platform-specific name type (e.g.
+`os::linux::local_socket::AbstractNsUdSocket`) `is_supported()` may query the OS and return
+`false` on an unsupported kernel or configuration.
+
+```rust
+use interprocess::local_socket::{GenericFilePath, GenericNamespaced, NameType};
+
+assert!(GenericFilePath::is_supported());
+assert!(GenericNamespaced::is_supported());
+```
+
+## Stability Guarantee
+
+From the `NameType` documentation in the source:
+
+> **It would be a breaking change for a mapping to meaningfully change.** More concretely, if a
+> name produced by this mapping from some input results in a valid listener via server creation or
+> successfully locates one via client creation, the name type will continue to map that input to
+> the same name, for the OS's definition of "same", within the current major version of
+> Interprocess.
+
+This means you can safely hard-code name-type choices in your application without fear of silent
+behaviour changes in patch or minor releases.
+
+## Complete Example
+
+```rust
+use interprocess::local_socket::{
+    GenericFilePath, GenericNamespaced, NameType, ToFsName, ToNsName,
+};
+use std::io;
+
+fn main() -> io::Result<()> {
+    // --- GenericNamespaced ---
+    // Preferred for most applications: no path to manage
+    let ns_name = "my-service".to_ns_name::<GenericNamespaced>()?;
+    println!("namespaced: is_namespaced={}", ns_name.is_namespaced());
+
+    // --- GenericFilePath ---
+    // Use when you need an exact path (Unix) or a specific named pipe (Windows)
+    #[cfg(unix)]
+    let fs_name = "/run/my-service.sock".to_fs_name::<GenericFilePath>()?;
+    #[cfg(windows)]
+    let fs_name = r"\\.\pipe\my-service".to_fs_name::<GenericFilePath>()?;
+    println!("filesystem path: is_path={}", fs_name.is_path());
+
+    Ok(())
+}
+```

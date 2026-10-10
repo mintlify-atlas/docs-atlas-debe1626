@@ -1,0 +1,111 @@
+---
+title: "TryClone: Fallible OS Handle Duplication"
+sidebarTitle: "TryClone"
+description: "Reference for the TryClone trait in Interprocess, which enables fallible OS handle and file descriptor duplication via DuplicateHandle or dup system calls."
+---
+
+`TryClone` is the Interprocess trait for fallible OS object duplication. The standard library's `Clone` trait is infallible — it cannot return an error — but OS handle and file descriptor duplication routinely involves system calls that may fail. `TryClone` fills this gap, offering a `try_clone(&self) -> io::Result<Self>` method on all Interprocess types that wrap OS objects.
+
+---
+
+## Trait Definition
+
+```rust
+pub trait TryClone: Sized {
+    /// Clones `self`, possibly returning an error.
+    fn try_clone(&self) -> std::io::Result<Self>;
+}
+```
+
+The only required method is `try_clone`, which attempts to produce an independent duplicate of the receiver. On success the new value owns its own OS resource (handle or file descriptor). On failure an `io::Error` is returned and the original value is unchanged.
+
+### Blanket Implementation
+
+All types that implement `Clone` automatically implement `TryClone` with an infallible implementation:
+
+```rust
+impl<T: Clone> TryClone for T {
+    fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(self.clone())
+    }
+}
+```
+
+This means `TryClone` is a strict superset of `Clone` — you can always call `try_clone()` on any `Clone` type and it will never fail.
+
+---
+
+## Why `TryClone` Instead of `Clone`?
+
+OS-level handle duplication is performed by:
+
+- **Windows** — `DuplicateHandle()`, which can fail with errors such as `ERROR_TOO_MANY_OPEN_FILES` when the process or system handle table is full.
+- **Unix** — `dup()` / `dup2()`, which can fail with `EMFILE` (per-process file descriptor limit) or `ENFILE` (system-wide file descriptor limit).
+
+Because `Clone::clone` has the signature `fn clone(&self) -> Self` with no way to signal failure, it is fundamentally incompatible with operations that can return an error. `TryClone` provides the ergonomics of a clone-like API while correctly surfacing these OS errors to the caller.
+
+---
+
+## Implementors
+
+`TryClone` is implemented for all Interprocess types that directly wrap OS handles or file descriptors:
+
+| Type | Module |
+|---|---|
+| `unnamed_pipe::Sender` | `interprocess::unnamed_pipe` |
+| `unnamed_pipe::Recver` | `interprocess::unnamed_pipe` |
+| `local_socket::ListenerOptions` | `interprocess::local_socket` |
+| `local_socket::Stream` | `interprocess::local_socket` |
+| `os::windows::named_pipe::PipeListenerOptions` | `interprocess::os::windows::named_pipe` |
+| `os::windows::named_pipe::PipeStream` | `interprocess::os::windows::named_pipe` |
+
+Any type implementing `Clone` also implements `TryClone` via the blanket impl, including all `Copy` types, `String`, `Vec<T>`, etc.
+
+---
+
+## Example
+
+```rust
+use interprocess::unnamed_pipe::{self, Sender};
+use std::io::Write;
+
+fn main() -> std::io::Result<()> {
+    // Create an unnamed pipe.
+    let (tx, rx) = unnamed_pipe::pipe()?;
+
+    // Duplicate the write end. This calls DuplicateHandle / dup under the hood
+    // and can fail if the system is out of handles/FDs.
+    let mut tx2 = tx.try_clone()?;
+
+    // Both tx and tx2 are independent write ends of the same pipe.
+    tx.write_all(b"from original\n")?;
+    tx2.write_all(b"from clone\n")?;
+
+    // rx will see both writes in order.
+    drop(tx);
+    drop(tx2);
+    // read from rx ...
+    Ok(())
+}
+```
+
+### Propagating Errors
+
+Because `try_clone` returns an `io::Result`, it composes naturally with the `?` operator:
+
+```rust
+use interprocess::{TryClone, unnamed_pipe};
+
+fn clone_sender(tx: &unnamed_pipe::Sender) -> std::io::Result<unnamed_pipe::Sender> {
+    tx.try_clone() // returns Err(io::Error) on resource exhaustion
+}
+```
+
+---
+
+## Relation to `std::os` Handle Types
+
+The standard library's `OwnedHandle` (Windows) and `OwnedFd` (Unix) do not implement `Clone` because duplication is fallible. Interprocess's `TryClone` is the idiomatic way to duplicate these wrapped types. Under the hood, Interprocess calls the appropriate system API for the current platform:
+
+- `DuplicateHandle` on Windows
+- `dup(2)` on Unix

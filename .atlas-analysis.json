@@ -1,0 +1,145 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Interprocess",
+  "projectDescription": "A cross-platform interprocess communication library for Rust that exposes local sockets, unnamed pipes, FIFO files, and Windows named pipes through a unified, portable interface with optional Tokio async support.",
+  "theme": "luma",
+  "primaryColor": "#1eaedb",
+  "lightColor": "#ffffff",
+  "darkColor": "#7c7c7c",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/local-sockets",
+              "concepts/unnamed-pipes",
+              "concepts/async-tokio",
+              "concepts/platform-support"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/local-socket-server",
+              "guides/local-socket-client",
+              "guides/tokio-async",
+              "guides/windows-named-pipes",
+              "guides/unix-fifo-files"
+            ]
+          },
+          {
+            "group": "Platform & Configuration",
+            "pages": [
+              "platform/feature-flags",
+              "platform/name-types",
+              "platform/security"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Local Sockets",
+            "pages": [
+              "api/local-socket/overview",
+              "api/local-socket/listener",
+              "api/local-socket/stream",
+              "api/local-socket/names",
+              "api/local-socket/peer-creds",
+              "api/local-socket/tokio"
+            ]
+          },
+          {
+            "group": "Unnamed Pipes",
+            "pages": [
+              "api/unnamed-pipe/overview",
+              "api/unnamed-pipe/tokio"
+            ]
+          },
+          {
+            "group": "OS-Specific",
+            "pages": [
+              "api/os/windows-named-pipes",
+              "api/os/unix-fifo-files"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/utilities/error-types",
+              "api/utilities/try-clone"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Cross-platform local sockets backed by Unix domain sockets on Unix and named pipes on Windows",
+    "Unnamed pipes for parent-child process communication",
+    "FIFO files (Unix) for communicating with programs that expect named pipes",
+    "Windows named pipes with full configuration including security descriptors",
+    "Tokio async support for local sockets and unnamed pipes",
+    "Stable, guaranteed name-to-primitive mapping for interoperability with non-Rust programs",
+    "Peer credentials (PID, UID, GID) access on supported platforms",
+    "Zero-overhead enum dispatch with platform-specific backends",
+    "Filesystem path and abstract namespace name types (GenericFilePath, GenericNamespaced)",
+    "Nonblocking mode, read/write timeouts, and stream splitting"
+  ],
+  "publicApiSurface": [
+    "local_socket::Listener",
+    "local_socket::Stream",
+    "local_socket::RecvHalf",
+    "local_socket::SendHalf",
+    "local_socket::ListenerOptions",
+    "local_socket::ConnectOptions",
+    "local_socket::Name",
+    "local_socket::NameType",
+    "local_socket::GenericFilePath",
+    "local_socket::GenericNamespaced",
+    "local_socket::PeerCreds",
+    "local_socket::prelude::*",
+    "local_socket::tokio::Listener",
+    "local_socket::tokio::Stream",
+    "local_socket::tokio::prelude::*",
+    "local_socket::traits::Listener",
+    "local_socket::traits::Stream",
+    "local_socket::traits::StreamCommon",
+    "local_socket::traits::RecvHalf",
+    "local_socket::traits::SendHalf",
+    "local_socket::ListenerNonblockingMode",
+    "unnamed_pipe::pipe()",
+    "unnamed_pipe::Sender",
+    "unnamed_pipe::Recver",
+    "unnamed_pipe::tokio::Sender",
+    "unnamed_pipe::tokio::Recver",
+    "os::unix::fifo_file::create_fifo()",
+    "os::windows::named_pipe::PipeListener",
+    "os::windows::named_pipe::PipeStream",
+    "os::windows::named_pipe::PipeListenerOptions",
+    "os::windows::named_pipe::PipeMode",
+    "os::windows::named_pipe::WaitTimeout",
+    "os::windows::named_pipe::tokio::PipeListener",
+    "os::windows::named_pipe::tokio::PipeStream",
+    "os::windows::security_descriptor::SecurityDescriptor",
+    "ConnectWaitMode",
+    "TryClone",
+    "error::ConversionError",
+    "error::ReuniteError",
+    "error::FromHandleError",
+    "error::FromFdError"
+  ]
+}

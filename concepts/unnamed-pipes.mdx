@@ -1,0 +1,107 @@
+---
+title: "Unnamed Pipes for Parent-Child Communication"
+sidebarTitle: "Unnamed Pipes"
+description: "Learn how Interprocess unnamed pipes extend std::process pipes, with inheritable handles for passing endpoints to child processes via arguments or env vars."
+---
+
+Unnamed pipes are the classic Unix IPC primitive — a unidirectional, kernel-buffered byte channel with a sending end and a receiving end. Interprocess exposes them via the `unnamed_pipe` module for cases where the standard library's built-in pipe support (`std::process::Stdio`) is not flexible enough. Because the handles and file descriptors are inheritable by default, unnamed pipes are most useful for setting up communication channels between a parent process and a child process it spawns.
+
+## When to Use Unnamed Pipes
+
+Use unnamed pipes when you need a child process to communicate back to its parent and the simple redirect-stdin/stdout mechanism of `std::process::Stdio` does not fit your use case. The standard library's `Stdio` integration should be preferred when possible — it offers consistent cross-platform behavior, lower overhead, and seamless integration with command-line tools.
+
+Reach for `interprocess::unnamed_pipe` when you need:
+
+- A **second channel** alongside stdin/stdout/stderr (for example, a dedicated error or control channel).
+- To pass the pipe **endpoint** to a child process programmatically via a CLI argument or environment variable rather than by redirecting stdio.
+- Direct access to the raw handle or file descriptor for advanced use cases.
+
+For process-to-process communication that doesn't involve a parent–child relationship, [local sockets](/concepts/local-sockets) are the better choice.
+
+## Creating a Pipe
+
+The `pipe()` function creates a new unnamed pipe and returns a `(Sender, Recver)` tuple:
+
+```rust
+use interprocess::unnamed_pipe::pipe;
+
+let (tx, rx) = pipe()?;
+```
+
+`Sender` implements `std::io::Write` and `Recver` implements `std::io::Read`. The two endpoints are independent — you can move them to different threads or processes.
+
+## Inheritable Handles
+
+The handles (on Windows) and file descriptors (on Unix) underlying `Sender` and `Recver` are **inheritable by default**. This means a child process spawned after the pipe is created will inherit the handles automatically.
+
+To hand a pipe endpoint to a child process, extract its raw numeric value and communicate it through a CLI argument or environment variable. The child reconstructs the endpoint from that value using `FromRawHandle` (Windows) or `FromRawFd` (Unix):
+
+**Parent process (side A):**
+
+```rust
+use interprocess::unnamed_pipe::pipe;
+use std::io::{prelude::*, BufReader};
+
+let (tx, rx) = pipe()?;
+
+// Convert the sender into an OwnedHandle / OwnedFd.
+// The numeric value equals the OS handle/FD and can be passed to the child.
+let txh: std::os::unix::io::OwnedFd = tx.into(); // Unix
+// (On Windows: let txh: std::os::windows::io::OwnedHandle = tx.into();)
+
+// Spawn the child process and pass the numeric FD value as an argument,
+// then use the receiver to read the child's response.
+let mut rx = BufReader::new(rx);
+let mut buf = String::with_capacity(128);
+rx.read_line(&mut buf)?;
+
+assert_eq!(buf.trim(), "Hello from child!");
+```
+
+**Child process (side B):**
+
+```rust
+use interprocess::unnamed_pipe;
+use std::io::prelude::*;
+
+// The handle value was received as a CLI argument from the parent.
+// It is numerically identical because child processes inherit handles/FDs.
+let mut tx = unnamed_pipe::Sender::from(handle); // handle is OwnedHandle / OwnedFd
+
+tx.write_all(b"Hello from child!\n")?;
+```
+
+Interprocess does not prescribe how the numeric handle value is transferred — CLI arguments, environment variables, and other startup-time IPC mechanisms all work.
+
+## Windows Limbo
+
+<Note>
+  On Windows, unnamed pipes (like named pipes) are subject to **limbo**: dropping a `Sender` does
+  not immediately discard the contents of the send buffer. Instead, the data is flushed and the
+  pipe is closed gracefully. This means the receiver will still see any bytes that were written
+  before the sender was dropped, even if the drop happens before the receiver has read them.
+</Note>
+
+## Tokio Support
+
+When the `tokio` feature is enabled, async versions of both endpoints are available:
+
+```rust
+use interprocess::unnamed_pipe::tokio::pipe;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+let (tx, rx) = pipe()?;
+
+// tx is unnamed_pipe::tokio::Sender — implements AsyncWrite
+// rx is unnamed_pipe::tokio::Recver — implements AsyncRead
+```
+
+The async `pipe()` function lives in `interprocess::unnamed_pipe::tokio` and returns `(tokio::Sender, tokio::Recver)`. Converting a tokio `Sender` into an `OwnedHandle`/`OwnedFd` uses `TryFrom` rather than `From`, reflecting the possibility of failure during the conversion.
+
+See [Async IPC with Tokio](/concepts/async-tokio) for more on enabling and using the Tokio integration.
+
+<Tip>
+  For higher-level, bidirectional IPC that doesn't require managing inheritable handles or child
+  process lifecycles manually, consider local sockets instead. See the
+  [local socket server guide](/guides/local-socket-server) for a complete worked example.
+</Tip>

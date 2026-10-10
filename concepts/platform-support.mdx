@@ -1,0 +1,66 @@
+---
+title: "Platform Support Levels in Interprocess"
+sidebarTitle: "Platform Support"
+description: "Interprocess defines four support tiers for operating systems: explicit support with CI, explicit with partial CI, explicit without CI, and support by association."
+---
+
+Interprocess is designed to work across all major operating systems, but not all platforms receive the same level of testing and maintenance attention. To be transparent about this, Interprocess defines **five named support levels** — deliberately not called *tiers* to avoid confusion with [Rust target tiers](https://doc.rust-lang.org/nightly/rustc/target-tier-policy.html), which work completely differently. Promoting a platform to a higher level is a non-breaking change that can happen in any minor or patch release. Demoting a platform would be a breaking change and is not expected to happen in normal circumstances.
+
+<Note>
+  These support levels describe the testing and CI guarantees provided by the Interprocess project
+  itself. They are independent of and not comparable to the Rust compiler's official target tier
+  system, which governs rustc's ability to compile code for a target at all.
+</Note>
+
+## Support Levels
+
+### Explicit Support
+
+**Platforms: Windows, Linux, macOS**
+
+The highest level of support. Interprocess is **guaranteed** to compile and pass all tests on these platforms — a failure would be treated as a severe bug. Continuous integration via GitHub Actions runs on all three platforms on every relevant code change. If anything breaks, a red badge appears on the repository immediately.
+
+Platform-specific features gated with `#[cfg]` are fully supported on these platforms with stable public APIs.
+
+### Explicit Support with Incomplete CI
+
+**Platforms: FreeBSD, Android**
+
+Interprocess is **expected** to compile and pass all tests. A failure would be treated as a bug. However, GitHub Actions does not provide native VMs for these targets, so CI is limited to Clippy and Rustdoc checks performed via cross-compilation. Full test execution does not happen in CI.
+
+Platform-specific features gated with `#[cfg]` are supported on these platforms with stable public APIs.
+
+### Explicit Support without CI
+
+**Platforms: OpenBSD, NetBSD**
+
+Interprocess is **expected** to compile and pass all tests. A failure would be treated as a bug. No CI runs because the standard library `.rlib` files for these targets cannot be installed via `rustup target add`. Testing is performed manually on local VMs before releases.
+
+Platform-specific features gated with `#[cfg]` are supported on these platforms with stable public APIs.
+
+### Support by Association
+
+**Platforms: Dragonfly BSD, Redox, Fuchsia, iOS, tvOS, watchOS**
+
+Interprocess is **expected** to compile and pass all tests because these platforms share relevant behavior with higher-level platforms. No manual testing is performed, and no CI is available because GitHub Actions does not provide it. Platform-specific features that originate from another platform and behave identically here are supported with stable public APIs.
+
+### Assumed Support
+
+**Platforms: Any `#[cfg(unix)]` system where the `libc` crate compiles, not listed above**
+
+Interprocess is expected to compile and pass tests, but a failure would be treated as a **low-priority bug** rather than a severe one. Because this level encompasses an open and potentially unbounded set of platforms with no reference implementation, no manual testing or CI is possible. The crate relies on `libc` for Unix system call access, so any Unix-like system for which `libc` compiles is likely to work.
+
+## Platform-Specific Extensions
+
+Interprocess follows a strict policy of gating platform-specific APIs behind `#[cfg]` attributes rather than providing stub implementations that fail at runtime. If you reference a platform-specific item on a platform that does not support it, **you will get a compile error**, not a runtime panic or an `Err`. This makes it impossible to accidentally ship code that calls an unsupported IPC feature on a production system.
+
+```rust
+// This code compiles only on Unix platforms.
+// On Windows, referencing peer_creds() features that rely on
+// Unix-specific ucred/xucred will produce a compile error,
+// not a runtime failure.
+#[cfg(unix)]
+let euid = stream.peer_creds()?.euid();
+```
+
+Platform-specific items are marked with `#[cfg_attr(feature = "doc_cfg", doc(cfg(...)))]` so that they appear with clear platform badges in the generated documentation when the `doc_cfg` feature is enabled (as it is on docs.rs).

@@ -1,0 +1,221 @@
+---
+title: "Error Types in Interprocess: ConversionError and ReuniteError"
+sidebarTitle: "Error Types"
+description: "Reference for Interprocess error types: ConversionError for failed handle/FD conversions with ownership return, ReuniteError for split stream reunification failures."
+---
+
+Interprocess defines specialized error types that preserve object ownership on failure. Rather than simply discarding the object that was being converted when an error occurs, these types return ownership of the input back to the caller wherever possible — allowing the caller to recover, retry, or use the object in another way.
+
+---
+
+## `ConversionError<S, E>`
+
+```rust
+#[derive(Debug)]
+pub struct ConversionError<S, E = NoDetails> {
+    pub details: E,
+    pub cause: Option<io::Error>,
+    pub source: Option<S>,
+}
+```
+
+The general-purpose error type for fallible constructors and type conversions in Interprocess. It is returned wherever a type is constructed from an OS handle or file descriptor and the conversion may fail — for example, when registering a handle with a Tokio runtime or when validating semantic invariants of the target type.
+
+The three fields carry complementary information:
+
+| Field | Type | Description |
+|---|---|---|
+| `details` | `E` | Extra information about *which stage* of the conversion failed. Typically an enum. Defaults to [`NoDetails`](#nodetails). |
+| `cause` | `Option<io::Error>` | The underlying OS error, if any. |
+| `source` | `Option<S>` | Ownership of the original input object, returned so the caller can reuse it. May be `None` if the callee was forced to drop it (e.g. Tokio does not provide a way to reclaim handles from failed registrations). |
+
+### Constructors
+
+These constructors are available when `E: Default`:
+
+```rust
+impl<S, E: Default> ConversionError<S, E> {
+    /// No OS cause; default details.
+    pub fn from_source(source: S) -> Self;
+
+    /// No ownership return; has an OS cause; default details.
+    pub fn from_cause(cause: io::Error) -> Self;
+
+    /// Returns ownership; has an OS cause; default details.
+    pub fn from_source_and_cause(source: S, cause: io::Error) -> Self;
+}
+```
+
+These constructors are always available:
+
+```rust
+impl<S, E> ConversionError<S, E> {
+    /// Returns ownership; no OS cause; explicit details.
+    pub fn from_source_and_details(source: S, details: E) -> Self;
+
+    /// No ownership return; no OS cause; explicit details.
+    pub fn from_cause_and_details(cause: io::Error, details: E) -> Self;
+}
+```
+
+### Source Mapping
+
+```rust
+impl<S, E> ConversionError<S, E> {
+    /// Transforms the type of the returned ownership via a closure.
+    pub fn map_source<Sb>(
+        self,
+        f: impl FnOnce(S) -> Sb,
+    ) -> ConversionError<Sb, E>;
+
+    /// Like map_source, but the closure may return None (discarding ownership).
+    pub fn try_map_source<Sb>(
+        self,
+        f: impl FnOnce(S) -> Option<Sb>,
+    ) -> ConversionError<Sb, E>;
+}
+```
+
+### Conversion to `io::Error`
+
+```rust
+impl<S, E: Display> ConversionError<S, E> {
+    /// Boxes the error message into an io::Error.
+    pub fn to_io_error(&self) -> io::Error;
+}
+
+impl<S, E: Display> From<ConversionError<S, E>> for io::Error {
+    fn from(e: ConversionError<S, E>) -> Self { e.to_io_error() }
+}
+```
+
+The `From` conversion uses the `Display` implementation of `ConversionError` (which combines `details` and `cause`) to produce a generic `io::Error`. Note that the `source` (returned ownership) is dropped in the process.
+
+### Trait Implementations
+
+| Trait | Bounds | Notes |
+|---|---|---|
+| `Debug` | — | Derived |
+| `Display` | `E: Display` | Formats `details` followed by `": "` and `cause` if present |
+| `Error` | `S: Debug, E: Error + 'static` | `source()` returns the OS error |
+| `Default` | `E: Default` | All fields are `None`/default |
+| `From<ConversionError<S, E>> for io::Error` | `E: Display` | Boxes to `io::Error` |
+
+---
+
+## Type Aliases
+
+### `FromHandleError<E = NoDetails>` (Windows only)
+
+```rust
+#[cfg(windows)]
+pub type FromHandleError<E = NoDetails> =
+    ConversionError<std::os::windows::io::OwnedHandle, E>;
+```
+
+Specialization of `ConversionError` for `TryFrom<OwnedHandle>` conversions on Windows. The `source` field, if present, is an `OwnedHandle` — the caller gets their handle back when the conversion fails.
+
+### `FromFdError<E = NoDetails>` (Unix only)
+
+```rust
+#[cfg(unix)]
+pub type FromFdError<E = NoDetails> =
+    ConversionError<std::os::unix::io::OwnedFd, E>;
+```
+
+Specialization of `ConversionError` for `TryFrom<OwnedFd>` conversions on Unix. The `source` field, if present, is an `OwnedFd`.
+
+---
+
+## `NoDetails`
+
+```rust
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NoDetails;
+```
+
+A marker type used as the default `E` parameter in `ConversionError` when no extra error detail is needed. Its `Display` implementation produces an empty string, so the formatted error message will contain only the OS error (if any).
+
+---
+
+## `ReuniteError<R, S>`
+
+```rust
+#[derive(Debug)]
+pub struct ReuniteError<R, S> {
+    pub rh: R,
+    pub sh: S,
+}
+```
+
+Returned by the `.reunite()` method on splittable stream types (e.g. `PipeStream`, local socket streams) when the provided receive half and send half were obtained from **different** stream instances. Reuniting mismatched halves would be unsound, so the operation is rejected and ownership of both halves is returned.
+
+### Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `rh` | `R` | The receive half that was passed to `.reunite()`. |
+| `sh` | `S` | The send half that was passed to `.reunite()`. |
+
+### Methods
+
+```rust
+impl<R, S> ReuniteError<R, S> {
+    /// Transforms both halves using the provided closures.
+    pub fn map_halves<NR: From<R>, NS: From<S>>(
+        self,
+        fr: impl FnOnce(R) -> NR,
+        fs: impl FnOnce(S) -> NS,
+    ) -> ReuniteError<NR, NS>;
+
+    /// Transforms both halves using their From implementations.
+    /// Useful when wrapping stream types.
+    pub fn convert_halves<NR: From<R>, NS: From<S>>(self) -> ReuniteError<NR, NS>;
+}
+```
+
+### Trait Implementations
+
+| Trait | Bounds | Notes |
+|---|---|---|
+| `Debug` | — | Derived |
+| `Display` | — | Prints `"attempt to reunite stream halves that come from different streams"` |
+| `Error` | `R: Debug, S: Debug` | No `source()` |
+
+---
+
+## `ReuniteResult<T, R, S>`
+
+```rust
+pub type ReuniteResult<T, R, S> = Result<T, ReuniteError<R, S>>;
+```
+
+Convenience type alias for the return type of `.reunite()` methods. `T` is the reunited stream type, `R` is the receive-half type, and `S` is the send-half type.
+
+---
+
+## Usage Example
+
+```rust
+use interprocess::error::{ConversionError, NoDetails, ReuniteError};
+use std::io;
+
+// Handling a FromFdError on Unix:
+#[cfg(unix)]
+fn try_convert(fd: std::os::unix::io::OwnedFd) -> io::Result<SomeStream> {
+    SomeStream::try_from(fd).map_err(|e: interprocess::error::FromFdError| {
+        // e.source is Some(fd) — you can reclaim the FD here
+        let recovered_fd = e.source;
+        e.to_io_error()
+    })
+}
+
+// Handling a ReuniteError:
+fn try_reunite(rh: RecvHalf, sh: SendHalf) -> io::Result<FullStream> {
+    FullStream::reunite(rh, sh).map_err(|e: ReuniteError<RecvHalf, SendHalf>| {
+        // e.rh and e.sh give back both halves
+        let (rh, sh) = (e.rh, e.sh);
+        io::Error::other("reunite failed: halves from different streams")
+    })
+}
+```

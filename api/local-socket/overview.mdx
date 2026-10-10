@@ -1,0 +1,157 @@
+---
+title: "local_socket Module: Cross-Platform Socket API"
+sidebarTitle: "Overview"
+description: "API overview of the interprocess::local_socket module. Covers Listener, Stream, name types, peer credentials, and the prelude for ergonomic imports."
+---
+
+The `local_socket` module is the primary public-facing IPC API in the `interprocess` crate. It provides a cross-platform local socket abstraction implemented in terms of OS-native IPC primitives — named pipes on Windows and Unix-domain sockets on Unix-like systems. Local sockets are far more appropriate for IPC than `localhost` TCP sockets, offering lower overhead, a friendlier naming model, and built-in peer authentication via [`PeerCreds`](/api/local-socket/peer-creds).
+
+<Note>
+  Interprocess **never** inserts message framing or metadata into the byte stream. The bytes you write are exactly the bytes the remote side reads. The specific underlying primitive is chosen based solely on the current platform and the [name type](/api/local-socket/names) used, ensuring protocol stability within a major version.
+</Note>
+
+## Module Structure
+
+The following types are exported from `interprocess::local_socket`:
+
+### Enum Dispatchers
+
+These types are enums in the style of [`enum_dispatch`](https://crates.io/crates/enum_dispatch). On any given platform only one variant is ever present (named pipes on Windows, Unix-domain sockets on Unix), so dispatch is currently zero-cost.
+
+| Type | Role |
+|------|------|
+| `Listener` | Server-side listener that accepts incoming connections |
+| `Stream` | Bidirectional byte-stream connection |
+| `RecvHalf` | Receive half produced by `Stream::split()` |
+| `SendHalf` | Send half produced by `Stream::split()` |
+
+### Builder Types
+
+| Type | Role |
+|------|------|
+| `ListenerOptions` | Server-side builder — creates a `Listener` or `tokio::Listener` |
+| `ConnectOptions` | Client-side builder — creates a `Stream` or `tokio::Stream` |
+
+### Name Types
+
+| Type | Role |
+|------|------|
+| `Name<'_>` | Opaque, platform-specific socket name |
+| `GenericFilePath` | Name type tag for filesystem-path sockets |
+| `GenericNamespaced` | Name type tag for namespace-based sockets |
+
+### Peer Credentials
+
+| Type | Role |
+|------|------|
+| `PeerCreds` | OS-provided identity of the remote connection endpoint |
+
+### Traits (`local_socket::traits`)
+
+| Trait | Role |
+|-------|------|
+| `traits::Listener` | Core server interface: `accept`, `set_nonblocking`, `do_not_reclaim_name_on_drop` |
+| `traits::ListenerExt` | Extension trait providing `incoming()` |
+| `traits::Stream` | Core client/connection interface: `connect`, `split`, timeouts |
+| `traits::StreamCommon` | Shared interface: `take_error`, `peer_creds` |
+| `traits::RecvHalf` | Receive-half interface: `set_timeout` |
+| `traits::SendHalf` | Send-half interface: `set_timeout` |
+
+### Async Variants (`local_socket::tokio`)
+
+| Type | Role |
+|------|------|
+| `tokio::Listener` | Async listener for use with the Tokio runtime |
+| `tokio::Stream` | Async bidirectional byte stream |
+| `tokio::RecvHalf` | Async receive half |
+| `tokio::SendHalf` | Async send half |
+
+---
+
+## Recommended Import
+
+```rust
+use interprocess::local_socket::prelude::*;
+```
+
+The `prelude` module brings in all traits needed to use local sockets ergonomically, without polluting your namespace with conflicting names. Specifically it re-exports:
+
+- `NameType as _` — enables `is_supported()` on name-type tags
+- `ToFsName as _` — enables `.to_fs_name::<T>()` on path types
+- `ToNsName as _` — enables `.to_ns_name::<T>()` on string types
+- `traits::Listener as _` — enables `accept`, `set_nonblocking`, etc.
+- `traits::ListenerExt as _` — enables `incoming()`
+- `traits::Stream as _` — enables `connect`, `split`, timeouts, etc.
+- `traits::StreamCommon as _` — enables `peer_creds`, `take_error`
+- `Listener as LocalSocketListener` — the enum dispatcher, aliased to avoid conflicts
+- `Stream as LocalSocketStream` — the enum dispatcher, aliased to avoid conflicts
+
+<Tip>
+  Using trait methods like `accept`, `connect`, and `split` requires their corresponding traits to be in scope. The prelude is the easiest way to ensure this.
+</Tip>
+
+---
+
+## Async Prelude
+
+```rust
+use interprocess::local_socket::tokio::prelude::*;
+```
+
+The `tokio::prelude` re-exports:
+
+- `NameType as _`, `ToFsName as _`, `ToNsName as _` — same as the sync prelude
+- `traits::tokio::Listener as _` — enables `accept` on `tokio::Listener`
+- `traits::tokio::Stream as _` — enables `connect`, `split`, etc. on `tokio::Stream`
+- `traits::StreamCommon as _` — enables `peer_creds`, `take_error`
+- `tokio::Listener as LocalSocketListener` — the async listener, aliased
+- `tokio::Stream as LocalSocketStream` — the async stream, aliased
+
+---
+
+## Raw Handle / File Descriptor Access
+
+The enum dispatchers intentionally do not implement `AsRawFd`, `IntoRawFd`, `FromRawFd` (Unix) or their Windows equivalents. To use those traits you must match on the enum variant directly:
+
+```rust
+#[cfg(unix)]
+use {interprocess::local_socket::prelude::*, std::os::unix::prelude::*};
+
+// Creating a stream from an owned file descriptor
+let stream = LocalSocketStream::UdSocket(fd.into());
+
+// Consuming a stream to get its file descriptor
+let fd = match stream {
+    LocalSocketStream::UdSocket(s) => OwnedFd::from(s),
+};
+
+// Borrowing a stream's file descriptor
+let stream_impl = match &stream {
+    LocalSocketStream::UdSocket(s) => s,
+};
+let fd = stream_impl.as_fd();
+```
+
+On Windows, substitute `Fd` with `Handle` throughout.
+
+---
+
+## Pages in This Group
+
+<CardGroup cols={2}>
+  <Card title="Listener" href="/api/local-socket/listener" icon="server">
+    `Listener`, `ListenerOptions`, `ListenerNonblockingMode`, and name reclamation
+  </Card>
+  <Card title="Stream" href="/api/local-socket/stream" icon="arrows-left-right">
+    `Stream`, `ConnectOptions`, `RecvHalf`, `SendHalf`, and timeout control
+  </Card>
+  <Card title="Names" href="/api/local-socket/names" icon="tag">
+    `Name`, `GenericFilePath`, `GenericNamespaced`, `ToFsName`, `ToNsName`
+  </Card>
+  <Card title="PeerCreds" href="/api/local-socket/peer-creds" icon="shield-check">
+    Peer credential verification: PID, UID, GID, and platform behavior
+  </Card>
+  <Card title="Tokio" href="/api/local-socket/tokio" icon="bolt">
+    Async `tokio::Listener` and `tokio::Stream` for the Tokio runtime
+  </Card>
+</CardGroup>

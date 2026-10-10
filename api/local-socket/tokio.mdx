@@ -1,0 +1,296 @@
+---
+title: "Async Local Sockets: tokio Module API Reference"
+sidebarTitle: "Tokio"
+description: "API reference for interprocess::local_socket::tokio, including async Listener and Stream types, the tokio prelude, and trait interfaces for async IPC."
+---
+
+The `local_socket::tokio` module provides async-native local socket types for use with the Tokio runtime. They behave identically to their synchronous counterparts from `local_socket` in terms of naming, dispatch, and protocol semantics, but all blocking operations are replaced with `async fn` equivalents that integrate with Tokio's I/O event loop. This means your server can handle many clients concurrently without spawning a dedicated OS thread per connection.
+
+<Warning>
+  All types in `local_socket::tokio` will **panic** if their methods are called outside of a Tokio runtime context. They are not compatible with other async runtimes such as `async-std` or `smol`.
+</Warning>
+
+---
+
+## Enabling
+
+Add the `tokio` feature to your `Cargo.toml`:
+
+```toml
+[dependencies]
+interprocess = { version = "2.4.4", features = ["tokio"] }
+tokio = { version = "1", features = ["full"] }
+```
+
+---
+
+## Async Prelude
+
+```rust
+use interprocess::local_socket::tokio::prelude::*;
+```
+
+The `tokio::prelude` module re-exports everything you need to work with async local sockets ergonomically:
+
+| Export | What it provides |
+|--------|-----------------|
+| `NameType as _` | `is_supported()` on name type tags |
+| `ToFsName as _` | `.to_fs_name::<T>()` on path types |
+| `ToNsName as _` | `.to_ns_name::<T>()` on string types |
+| `traits::tokio::Listener as _` | `accept`, `do_not_reclaim_name_on_drop` |
+| `traits::tokio::Stream as _` | `connect`, `split`, `reunite` |
+| `traits::StreamCommon as _` | `peer_creds`, `take_error` |
+| `tokio::Listener as LocalSocketListener` | The async listener enum dispatcher |
+| `tokio::Stream as LocalSocketStream` | The async stream enum dispatcher |
+
+---
+
+## `tokio::Listener`
+
+```rust
+// interprocess::local_socket::tokio::Listener
+```
+
+The async version of [`Listener`](/api/local-socket/listener). Created via [`ListenerOptions::create_tokio()`](/api/local-socket/listener#creation-methods), it accepts incoming connections asynchronously. Like the sync `Listener`, it is an enum dispatcher (named pipe on Windows, Unix-domain socket on Unix).
+
+[Name reclamation](/api/local-socket/listener#name-reclamation) behaves identically to the sync variant: the socket file is unlinked on drop unless disabled.
+
+### `accept`
+
+```rust
+async fn accept(&self) -> io::Result<tokio::Stream>
+```
+
+Asynchronously waits for an incoming client connection and returns the new `tokio::Stream`. This future resolves as soon as a client connects.
+
+```rust
+let conn = listener.accept().await?;
+```
+
+<Warning>
+  **Windows behavior**: Same as the sync variant — `accept` must be called periodically. If a client connects and disconnects without `accept` being awaited between those events, the named pipe instance enters a dead-on-arrival state that blocks new connections until `accept` is called to drain it.
+</Warning>
+
+### `do_not_reclaim_name_on_drop`
+
+```rust
+fn do_not_reclaim_name_on_drop(&mut self)
+```
+
+Disables automatic socket file cleanup on drop, equivalent to `.reclaim_name(false)` on `ListenerOptions`.
+
+### Creating a `tokio::Listener`
+
+```rust
+use interprocess::local_socket::{
+    tokio::prelude::*,
+    GenericNamespaced,
+    ListenerOptions,
+};
+
+let name = "my-app.sock".to_ns_name::<GenericNamespaced>()?;
+let listener = ListenerOptions::new()
+    .name(name)
+    .create_tokio()?;
+```
+
+---
+
+## `tokio::Stream`
+
+```rust
+// interprocess::local_socket::tokio::Stream
+```
+
+The async version of [`Stream`](/api/local-socket/stream). It is an enum dispatcher and is obtained either by calling `tokio::Listener::accept().await` (server side) or `ConnectOptions::connect_tokio().await` / `tokio::Stream::connect(name).await` (client side).
+
+`tokio::Stream` implements `tokio::io::AsyncRead` and `tokio::io::AsyncWrite` — both by value and by `&` reference — making it compatible with the full Tokio I/O ecosystem including `BufReader`, `AsyncBufReadExt`, `AsyncWriteExt`, etc.
+
+<Note>
+  Flushing and shutdown on `tokio::Stream` are always successful no-ops at the Interprocess layer. The stream is not internally buffered.
+</Note>
+
+### `connect`
+
+```rust
+async fn connect(name: Name<'_>) -> io::Result<Self>
+```
+
+Shorthand for `ConnectOptions::new().name(name).connect_tokio_as::<Self>().await`. Connects to a local socket server asynchronously.
+
+```rust
+use interprocess::local_socket::{tokio::prelude::*, GenericNamespaced, Stream as LocalSocketStream};
+
+let name = "my-app.sock".to_ns_name::<GenericNamespaced>()?;
+let stream = LocalSocketStream::connect(name).await?;
+```
+
+### `split`
+
+```rust
+fn split(self) -> (tokio::RecvHalf, tokio::SendHalf)
+```
+
+Consumes the stream and produces separate receive and send halves. `RecvHalf` implements `AsyncRead`; `SendHalf` implements `AsyncWrite`.
+
+```rust
+let (recv_half, send_half) = stream.split();
+```
+
+<Tip>
+  As with the sync API, wrapping the stream in an `Arc` is often a simpler alternative to splitting, since `&tokio::Stream` implements both `AsyncRead` and `AsyncWrite`:
+
+  ```rust
+  use std::sync::Arc;
+  use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+  let conn = Arc::new(stream);
+  let mut recver = BufReader::new(&*conn);
+  let mut sender = &*conn;
+
+  let send = sender.write_all(b"hello\n");
+  let recv = recver.read_line(&mut buf);
+  tokio::try_join!(send, recv)?;
+  ```
+
+  Dropping a `RecvHalf` or `SendHalf` does **not** shut down the connection.
+</Tip>
+
+### `reunite`
+
+```rust
+fn reunite(rh: tokio::RecvHalf, sh: tokio::SendHalf) -> ReuniteResult<tokio::Stream>
+```
+
+Attempts to recombine split halves into the original stream. Returns an error containing both halves if they originated from different streams.
+
+### `peer_creds` and `take_error`
+
+`tokio::Stream` implements `StreamCommon`, providing:
+
+```rust
+fn peer_creds(&self) -> io::Result<PeerCreds>
+fn take_error(&self) -> io::Result<Option<io::Error>>
+```
+
+See [`PeerCreds`](/api/local-socket/peer-creds) for details on available credential fields per platform.
+
+---
+
+## `traits::tokio::Listener` and `traits::tokio::Stream`
+
+These are the trait definitions for the async dispatch types. The enum types `tokio::Listener` and `tokio::Stream` implement them. You normally interact with these traits via the prelude imports.
+
+```rust
+// Bring into scope to call trait methods:
+use interprocess::local_socket::tokio::prelude::*;
+// or individually:
+use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};
+```
+
+`traits::tokio::Listener` defines:
+- `fn from_options(options: ListenerOptions<'_>) -> io::Result<Self>`
+- `async fn accept(&self) -> io::Result<Self::Stream>`
+- `fn do_not_reclaim_name_on_drop(&mut self)`
+
+`traits::tokio::Stream` defines:
+- `async fn connect(name: Name<'_>) -> io::Result<Self>`
+- `fn split(self) -> (Self::RecvHalf, Self::SendHalf)`
+- `fn reunite(rh: Self::RecvHalf, sh: Self::SendHalf) -> ReuniteResult<Self>`
+- `async fn from_options(options: &ConnectOptions<'_>) -> io::Result<Self>`
+
+---
+
+## Concurrency Pattern
+
+The idiomatic pattern for a Tokio local socket server is to call `listener.accept().await` in a loop and spawn a new task per connection:
+
+```rust
+use interprocess::local_socket::{
+    tokio::{prelude::*, Stream},
+    GenericNamespaced,
+    ListenerOptions,
+};
+use std::io;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+async fn handle_conn(conn: Stream) -> io::Result<()> {
+    let mut recver = BufReader::new(&conn);
+    let mut sender = &conn;
+
+    let mut buf = String::with_capacity(128);
+
+    // Concurrently receive and send
+    tokio::try_join!(
+        recver.read_line(&mut buf),
+        sender.write_all(b"Hello from server!\n"),
+    )?;
+
+    println!("Client said: {buf}");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let name = "example.sock".to_ns_name::<GenericNamespaced>()?;
+
+    let listener = ListenerOptions::new()
+        .name(name)
+        .try_overwrite(true)
+        .create_tokio()?;
+
+    eprintln!("Server ready");
+
+    loop {
+        let conn = match listener.accept().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Incoming connection error: {e}");
+                continue;
+            }
+        };
+
+        // Hand the connection to a new async task
+        tokio::spawn(async move {
+            if let Err(e) = handle_conn(conn).await {
+                eprintln!("Error handling connection: {e}");
+            }
+        });
+    }
+}
+```
+
+---
+
+## Async Client Example
+
+```rust
+use interprocess::local_socket::{
+    tokio::{prelude::*, Stream as LocalSocketStream},
+    GenericFilePath,
+    GenericNamespaced,
+};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let name = if GenericNamespaced::is_supported() {
+        "example.sock".to_ns_name::<GenericNamespaced>()?
+    } else {
+        "/tmp/example.sock".to_fs_name::<GenericFilePath>()?
+    };
+
+    let conn = LocalSocketStream::connect(name).await?;
+    let mut recver = BufReader::new(&conn);
+    let mut sender = &conn;
+
+    let mut buf = String::new();
+    tokio::try_join!(
+        sender.write_all(b"Hello from client!\n"),
+        recver.read_line(&mut buf),
+    )?;
+
+    println!("Server said: {buf}");
+    Ok(())
+}
+```

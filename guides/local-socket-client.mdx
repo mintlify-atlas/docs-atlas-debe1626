@@ -1,0 +1,170 @@
+---
+title: "Connect a Local Socket Client with Interprocess"
+sidebarTitle: "Socket Client"
+description: "Learn how to connect a Rust process to a local socket server using Interprocess, send a message, and read the server's response with proper error handling."
+---
+
+The client side of a local socket connection is simpler than the server side: there is no binding, no listening, and no loop — just connect, exchange data, and disconnect. This guide walks through writing a Rust client that connects to a running local socket server, sends a single line of text, and reads the server's reply.
+
+## Prerequisites
+
+Add `interprocess` to your `Cargo.toml`:
+
+```toml
+[dependencies]
+interprocess = "2"
+```
+
+## Step-by-step walkthrough
+
+<Steps>
+  <Step title="Create the socket name">
+    The client must use the same name that the server is listening on. Use `GenericNamespaced` when the platform supports it; fall back to a file-system path with `GenericFilePath` otherwise:
+
+    ```rust
+    use interprocess::local_socket::{prelude::*, GenericFilePath, GenericNamespaced, Stream};
+
+    let name = if GenericNamespaced::is_supported() {
+        "example.sock".to_ns_name::<GenericNamespaced>()?
+    } else {
+        "/tmp/example.sock".to_fs_name::<GenericFilePath>()?
+    };
+    ```
+  </Step>
+
+  <Step title="Connect with Stream::connect">
+    `Stream::connect` is the quickest way to open a connection. It fails immediately if the server has not started yet:
+
+    ```rust
+    let conn = Stream::connect(name)?;
+    ```
+
+    Wrap the stream in a `BufReader` for convenient line-based reading while keeping a mutable reference to the underlying stream for writing:
+
+    ```rust
+    use std::io::BufReader;
+
+    let mut conn = BufReader::new(Stream::connect(name)?);
+    ```
+  </Step>
+
+  <Step title="Write a message with write_all">
+    `BufReader` does not implement `Write`, so call `.get_mut()` to reach the underlying stream:
+
+    ```rust
+    use std::io::prelude::*;
+
+    conn.get_mut().write_all(b"Hello from client!\n")?;
+    ```
+
+    Send before receiving here because the server in the companion guide waits for a line before it sends its response. Always agree with the server on the send/receive order to avoid deadlocks.
+  </Step>
+
+  <Step title="Read the response with BufReader and read_line">
+    After sending, block until the server sends back a newline-terminated reply:
+
+    ```rust
+    let mut buffer = String::with_capacity(128);
+    conn.read_line(&mut buffer)?;
+
+    drop(conn);
+    print!("Server answered: {buffer}");
+    ```
+
+    `read_line` interprets a newline as the end of the current message, which is the portable way to delimit messages on local sockets (there is no partial-shutdown mechanism that can signal end-of-stream from one direction only).
+  </Step>
+</Steps>
+
+## Full working example
+
+```rust
+use {
+    interprocess::local_socket::{prelude::*, GenericFilePath, GenericNamespaced, Stream},
+    std::io::{prelude::*, BufReader},
+};
+
+fn main() -> std::io::Result<()> {
+    let name = if GenericNamespaced::is_supported() {
+        "example.sock".to_ns_name::<GenericNamespaced>()?
+    } else {
+        "/tmp/example.sock".to_fs_name::<GenericFilePath>()?
+    };
+
+    let mut buffer = String::with_capacity(128);
+
+    // Will fail immediately if the server hasn't started yet.
+    let mut conn = BufReader::new(Stream::connect(name)?);
+
+    // BufReader doesn't pass Write through, so we use get_mut.
+    conn.get_mut().write_all(b"Hello from client!\n")?;
+
+    // We now employ the buffer we allocated prior and receive a single line,
+    // interpreting a newline character as an end-of-file (because local
+    // sockets cannot be portably shut down), verifying validity of UTF-8 on
+    // the fly.
+    conn.read_line(&mut buffer)?;
+
+    // Avoid holding up resources.
+    drop(conn);
+
+    // read_line keeps the line feed at the end.
+    print!("Server answered: {buffer}");
+    Ok(())
+}
+```
+
+## ConnectOptions
+
+`Stream::connect(name)` is a shorthand. The long form using `ConnectOptions` lets you set additional parameters before connecting:
+
+```rust
+use interprocess::local_socket::ConnectOptions;
+
+let conn = ConnectOptions::new()
+    .name(name)
+    .connect_sync()?;
+```
+
+`ConnectOptions` is the right choice when you need to set a wait mode — for instance, instructing the client to keep retrying until the server becomes available — or when you want to connect as a specific stream type with `connect_sync_as::<MyStreamType>()`.
+
+## Timeouts
+
+The `Stream` trait exposes optional receive and send timeouts. When a timeout is set, the corresponding operation returns `io::ErrorKind::TimedOut` instead of blocking indefinitely:
+
+```rust
+use std::time::Duration;
+
+// Fail a read after 5 seconds of silence from the server.
+conn.get_ref().set_recv_timeout(Some(Duration::from_secs(5)))?;
+
+// Fail a write after 2 seconds if the send buffer is full.
+conn.get_ref().set_send_timeout(Some(Duration::from_secs(2)))?;
+
+// Remove the timeout (block forever again).
+conn.get_ref().set_recv_timeout(None)?;
+```
+
+Pass `None` to restore the default blocking behaviour.
+
+## Stream Splitting
+
+When you need to hand off reading and writing to separate parts of your program, call `.split()` on the stream to obtain a `(RecvHalf, SendHalf)` pair:
+
+```rust
+let (recv_half, send_half) = stream.split();
+```
+
+Each half can be moved to a different thread or function independently. To recombine them:
+
+```rust
+use interprocess::local_socket::Stream;
+
+let stream = Stream::reunite(recv_half, send_half)
+    .expect("halves must belong to the same stream");
+```
+
+Note that dropping a half does **not** shut down that direction of the connection — unlike TCP sockets. If you want a clean shutdown signal, you must implement it at the application protocol level (for example, with a sentinel byte sequence).
+
+<Tip>
+  Before reaching for `.split()`, consider wrapping the stream in an `Arc` instead. Because `&Stream` implements both `Read` and `Write`, you can share the stream across threads with `Arc::clone` and avoid the overhead of splitting and potentially reuniting. This approach is also demonstrated in the [Tokio Async guide](/guides/tokio-async) on the async side.
+</Tip>

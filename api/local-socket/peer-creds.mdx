@@ -1,0 +1,212 @@
+---
+title: "PeerCreds: Peer Credential Verification API"
+sidebarTitle: "PeerCreds"
+description: "Reference for the PeerCreds type in Interprocess, providing access to the PID, UID, and GID of the connected peer for authentication on supported platforms."
+---
+
+`PeerCreds` provides access to the OS-level identity of the remote side of a local socket connection. The OS records the credentials of each connecting process at connection time, allowing the receiving side to verify who it is talking to without requiring any in-band authentication protocol. This is considerably more trustworthy than user-supplied identity claims, but not without caveats — see [Security Considerations](#security-considerations) below.
+
+<Note>
+  `PeerCreds` is inspired by `std::fs::Metadata` in its design: it is a plain data-holding struct with getter methods, and the available fields vary by platform.
+</Note>
+
+---
+
+## Accessing Peer Credentials
+
+Peer credentials are obtained via the `peer_creds` method on the [`StreamCommon`](/api/local-socket/stream#traits-streamcommon-trait) trait, which is implemented by both sync `Stream` and the async `tokio::Stream`.
+
+```rust
+use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream as LocalSocketStream};
+
+let name = "my-app.sock".to_ns_name::<GenericNamespaced>()?;
+let stream = LocalSocketStream::connect(name)?;
+
+let creds = stream.peer_creds()?;
+println!("Connected to PID: {:?}", creds.pid());
+
+#[cfg(unix)]
+{
+    println!("  Effective UID: {:?}", creds.euid());
+    println!("  Effective GID: {:?}", creds.egid());
+}
+```
+
+---
+
+## Available Fields
+
+### `pid`
+
+```rust
+pub fn pid(&self) -> Option<Pid>
+```
+
+Returns the process ID of the peer, or `None` if unavailable on the current platform.
+
+Available on:
+- **Windows** — always available
+- **`ucred`-based platforms** — Linux (including Android), OpenBSD, Fuchsia, Redox
+- **FreeBSD** (via `xucred`)
+
+```rust
+if let Some(pid) = creds.pid() {
+    println!("Peer PID: {}", pid);
+}
+```
+
+---
+
+### `euid` (Unix only)
+
+```rust
+#[cfg(unix)]
+pub fn euid(&self) -> Option<uid_t>
+```
+
+Returns the effective user ID of the peer, or `None` if unavailable.
+
+Available on:
+- `ucred`-based platforms: Linux, OpenBSD, Fuchsia, Redox
+- `xucred`-based platforms: FreeBSD, DragonFly BSD, macOS, iOS, tvOS, watchOS
+- NetBSD
+
+```rust
+#[cfg(unix)]
+if let Some(uid) = creds.euid() {
+    if uid == 0 {
+        println!("Peer is root");
+    }
+}
+```
+
+---
+
+### `egid` (Unix only)
+
+```rust
+#[cfg(unix)]
+pub fn egid(&self) -> Option<gid_t>
+```
+
+Returns the effective group ID of the peer, or `None` if unavailable.
+
+Available on:
+- `ucred`-based platforms: Linux, OpenBSD, Fuchsia, Redox
+- NetBSD
+
+```rust
+#[cfg(unix)]
+if let Some(gid) = creds.egid() {
+    println!("Peer GID: {}", gid);
+}
+```
+
+---
+
+### `groups` (Unix only)
+
+```rust
+#[cfg(unix)]
+pub fn groups(&self) -> Option<&[gid_t]>
+```
+
+Returns the supplementary group IDs of the peer, or `None` if unavailable.
+
+Available on:
+- `xucred`-based platforms: FreeBSD, DragonFly BSD, macOS, iOS, tvOS, watchOS
+
+```rust
+#[cfg(unix)]
+if let Some(groups) = creds.groups() {
+    println!("Peer supplementary groups: {:?}", groups);
+}
+```
+
+---
+
+## Platform Behavior Summary
+
+| Field | Linux/Android | macOS/BSD | Windows | NetBSD | FreeBSD |
+|-------|--------------|-----------|---------|--------|---------|
+| `pid()` | ✅ | ❌ | ✅ | ❌ | ✅ |
+| `euid()` | ✅ | ✅ | N/A | ✅ | ✅ |
+| `egid()` | ✅ | ❌ | N/A | ✅ | ❌ |
+| `groups()` | ❌ | ✅ | N/A | ❌ | ✅ |
+
+### Credential timestamp
+
+On most Unix platforms, the credentials returned are those in effect at the time of the `connect` call (for client credentials) or the `listen` call (for server credentials). On **OpenBSD** and **NetBSD**, server credentials are instead those which were in effect at the time of `bind`.
+
+---
+
+## Security Considerations
+
+While `PeerCreds` provides genuine OS-level identity information, there are important race conditions and limitations to be aware of before using credentials for security decisions.
+
+### PID reuse race
+
+The `pid` field is subject to a time-of-check/time-of-use (TOCTOU) race. After credentials are captured at connection time, the peer process may:
+
+1. Exit and have its PID reused by an unrelated process.
+2. Transfer the connection file descriptor to a different process via `SCM_RIGHTS` (Unix) or handle inheritance (Windows) before the credentials are read.
+
+If you use the PID to look up additional security attributes (e.g., querying `/proc/<pid>/exe`), those lookups are only valid if the original process is still alive. Performing multiple lookups and confirming consistency can reduce (but not eliminate) the risk.
+
+### Credentials at connection time
+
+Credentials reflect the peer's identity at the moment of connection, not at the moment `peer_creds` is called. A process that has since changed its UID/GID via `setuid`/`setgid` will still appear with its original credentials.
+
+<Warning>
+  Do not rely solely on `PeerCreds` as the only security mechanism in your application. It is best used as a first-pass filter (e.g., "only accept connections from root") combined with other controls such as filesystem permissions on the socket file, separate authentication tokens, or capability checks. PID-based identity lookups are especially vulnerable to reuse races if the peer connection handle can be inherited or transferred.
+</Warning>
+
+---
+
+## Full Authentication Example
+
+```rust
+use interprocess::local_socket::{
+    prelude::*,
+    GenericNamespaced,
+    ListenerOptions,
+};
+use std::io;
+
+fn main() -> io::Result<()> {
+    let name = "secure-app.sock".to_ns_name::<GenericNamespaced>()?;
+    let listener = ListenerOptions::new().name(name).create_sync()?;
+
+    for conn in listener.incoming().filter_map(|c| c.ok()) {
+        let creds = conn.peer_creds()?;
+
+        #[cfg(unix)]
+        {
+            // Only accept connections from root (UID 0)
+            match creds.euid() {
+                Some(0) => println!("Accepting privileged connection"),
+                Some(uid) => {
+                    eprintln!("Rejecting unprivileged peer (UID {uid})");
+                    continue;
+                }
+                None => {
+                    eprintln!("Could not determine peer UID");
+                    continue;
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            if let Some(pid) = creds.pid() {
+                println!("Connection from PID {}", pid);
+            }
+        }
+
+        // Handle the authenticated connection...
+        drop(conn);
+    }
+
+    Ok(())
+}
+```

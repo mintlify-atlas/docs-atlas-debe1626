@@ -1,0 +1,216 @@
+---
+title: "Build a Local Socket Server with Interprocess"
+sidebarTitle: "Socket Server"
+description: "Step-by-step guide to creating a synchronous local socket server in Rust that listens for client connections and handles each one sequentially."
+---
+
+Local sockets are the recommended way to do inter-process communication with Interprocess. They work across all major platforms and hide the differences between Unix domain sockets (on Linux/macOS) and Windows named pipes behind a single unified API. This guide walks you through building a synchronous server that binds to a socket name, accepts incoming client connections one at a time, reads a message from each client, sends a response, and then moves on to the next.
+
+## Prerequisites
+
+Add `interprocess` to your `Cargo.toml`:
+
+```toml
+[dependencies]
+interprocess = "2"
+```
+
+## Step-by-step walkthrough
+
+<Steps>
+  <Step title="Create a socket name with GenericNamespaced">
+    The first thing a server needs is a name that clients can connect to. `GenericNamespaced` resolves to the best available namespace for the current platform — abstract namespace on Linux, and a named-pipe path on Windows.
+
+    ```rust
+    use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+
+    let printname = "example.sock";
+    let name = printname.to_ns_name::<GenericNamespaced>()?;
+    ```
+
+    If your platform does not support namespace-based socket names (e.g. macOS, which only supports file-system paths), you can fall back to `GenericFilePath` and a path such as `"/tmp/example.sock"`.
+  </Step>
+
+  <Step title="Create the listener with ListenerOptions">
+    Pass the name to `ListenerOptions` and call `create_sync()` to bind the server socket and begin listening:
+
+    ```rust
+    use std::io;
+
+    let listener = match ListenerOptions::new().name(name).create_sync() {
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+            eprintln!(
+                "Error: could not start server because the socket file is \
+                occupied. Please check if {printname} is in use by another \
+                process and try again."
+            );
+            return Err(e);
+        }
+        x => x?,
+    };
+    ```
+
+    The `create_sync()` call returns a `Listener` that is immediately ready to accept connections.
+  </Step>
+
+  <Step title="Handle the AddrInUse error (corpse sockets)">
+    On platforms that use file-system socket paths, if a server process terminates without cleanly deleting its socket file, a **corpse socket** is left behind. The file exists but no process is listening on it, so new connections will fail and a new listener cannot bind to the same path.
+
+    The example above handles this by printing a helpful message and exiting. In production code you should instead pass `.try_overwrite(true)` to `ListenerOptions` so that Interprocess automatically deletes the stale socket file before binding:
+
+    ```rust
+    let listener = ListenerOptions::new()
+        .name(name)
+        .try_overwrite(true)
+        .create_sync()?;
+    ```
+
+    Be aware that `.try_overwrite(true)` will also displace a **live** listener, so use it only when you are certain the name should belong to your process.
+  </Step>
+
+  <Step title="Iterate over incoming connections">
+    `listener.incoming()` returns an infinite iterator that yields one `io::Result<Stream>` per connecting client. Use `filter_map` to log and skip failed connections without crashing the server:
+
+    ```rust
+    use std::io::BufReader;
+
+    for mut conn in listener
+        .incoming()
+        .filter_map(|conn| {
+            conn.map_err(|e| eprintln!("Incoming connection failed: {e}")).ok()
+        })
+        .map(BufReader::new)
+    {
+        // handle each conn here
+    }
+    ```
+  </Step>
+
+  <Step title="Read and write using BufReader and write_all">
+    Inside the loop, perform a receive before a send to avoid a deadlock. Because neither side can simultaneously send and receive without threads or async, both sides must agree on the order of operations:
+
+    ```rust
+    use std::io::prelude::*;
+
+    conn.read_line(&mut buffer)?;
+
+    // BufReader doesn't implement Write pass-through, so use get_mut().
+    conn.get_mut().write_all(b"Hello from server!\n")?;
+
+    drop(conn);
+    print!("Client answered: {buffer}");
+    buffer.clear();
+    ```
+  </Step>
+</Steps>
+
+## Full working example
+
+The complete server, taken directly from the Interprocess repository:
+
+```rust
+use {
+    interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions},
+    std::io::{self, prelude::*, BufReader},
+};
+
+fn main() -> std::io::Result<()> {
+    let printname = "example.sock";
+    let name = printname.to_ns_name::<GenericNamespaced>()?;
+
+    let listener = match ListenerOptions::new().name(name).create_sync() {
+        Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+            // When a program that uses a file-type socket name terminates
+            // its socket server without deleting the file, a "corpse socket"
+            // remains, which can neither be connected to nor reused by a new
+            // listener. Normally, Interprocess takes care of this on affected
+            // platforms by deleting the socket file when the listener is
+            // dropped. (This is vulnerable to all sorts of races and thus can
+            // be disabled.)
+            //
+            // In a real program, instead of leaving it up to the user
+            // to perform cleanup, one would use the .try_overwrite(true)
+            // listener option to try to replace the socket.
+            eprintln!(
+                "Error: could not start server because the socket file is \
+                occupied. Please check if {printname} is in use by another \
+                process and try again."
+            );
+            return Err(e);
+        }
+        x => x?,
+    };
+
+    // This is a good place to inform clients that the server is ready.
+    eprintln!("Server running at {printname}");
+
+    // This buffer will be reused between clients.
+    let mut buffer = String::with_capacity(128);
+
+    for mut conn in listener
+        .incoming()
+        .filter_map(|conn| conn.map_err(|e| eprintln!("Incoming connection failed: {e}")).ok())
+        .map(BufReader::new)
+    {
+        // Since our client example sends first, the server should receive a
+        // line and only then send a response. Otherwise, because receiving
+        // from and sending to a connection cannot be simultaneous without
+        // threads or async, we can deadlock the two processes by having both
+        // sides wait for the send buffer to be emptied by the other.
+        conn.read_line(&mut buffer)?;
+
+        // Now that the receive has come through and the client is waiting
+        // on the server's send, do it. (.get_mut() is to get the sender,
+        // BufReader doesn't implement a pass-through Write.)
+        conn.get_mut().write_all(b"Hello from server!\n")?;
+
+        // Avoid holding up resources.
+        drop(conn);
+
+        // read_line keeps the line feed at the end.
+        print!("Client answered: {buffer}");
+
+        // Clear the buffer so that the next iteration will display new data
+        // instead of messages stacking on top of one another.
+        buffer.clear();
+    }
+    Ok(())
+}
+```
+
+## Nonblocking Mode
+
+By default, `accept()` (and by extension the `.incoming()` iterator) blocks until a client arrives. You can make it return immediately with a `WouldBlock` error when no client is waiting by enabling nonblocking mode on the listener:
+
+```rust
+use interprocess::local_socket::ListenerNonblockingMode;
+
+listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
+```
+
+The `ListenerNonblockingMode` enum has four variants:
+
+| Variant    | `.accept()` nonblocking | Resulting stream nonblocking |
+|------------|------------------------|------------------------------|
+| `Neither`  | No (default)           | No                           |
+| `Accept`   | Yes                    | No                           |
+| `Stream`   | No                     | Yes                          |
+| `Both`     | Yes                    | Yes                          |
+
+Nonblocking mode is useful when you want to poll the listener from an event loop rather than dedicating a thread to it.
+
+## Name Reclamation
+
+On platforms that use file-system paths for socket names (all Unix platforms other than Linux's abstract namespace), Interprocess automatically **deletes the socket file** when the `Listener` is dropped. This prevents corpse sockets from accumulating across restarts.
+
+Name reclamation is enabled by default. To disable it — for example when you want to keep the file around for debugging — call:
+
+```rust
+listener.do_not_reclaim_name_on_drop();
+```
+
+To go the other way and aggressively reclaim names that may be in use by a prior listener, use `.try_overwrite(true)` in `ListenerOptions` as shown above.
+
+<Note>
+  This guide covers sequential, single-threaded client handling. To handle many clients concurrently without OS threads, see the [Tokio Async guide](/guides/tokio-async).
+</Note>

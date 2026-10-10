@@ -1,0 +1,183 @@
+---
+title: "unnamed_pipe::tokio: Async Pipe API Reference"
+sidebarTitle: "Tokio Pipes"
+description: "Reference for the Tokio async variants of Interprocess unnamed pipes, including async Sender and Recver that integrate with the Tokio runtime."
+---
+
+The `unnamed_pipe::tokio` module provides async-capable versions of `Sender` and `Recver` designed for use within the [Tokio](https://tokio.rs) async runtime. These types implement `AsyncWrite` and `AsyncRead` respectively, and integrate directly with Tokio's I/O infrastructure. They are created via the module-level `pipe()` function and can also be constructed from or converted into their sync counterparts and raw OS handles.
+
+## Enabling the Tokio Feature
+
+The `unnamed_pipe::tokio` module is gated behind the `tokio` Cargo feature. Add it to your `Cargo.toml`:
+
+```toml
+[dependencies]
+interprocess = { version = "...", features = ["tokio"] }
+```
+
+---
+
+## `tokio::pipe()` Function
+
+```rust
+pub fn pipe() -> io::Result<(Sender, Recver)>
+```
+
+Creates a new anonymous pipe and returns an async-capable `(Sender, Recver)` pair. Both ends are immediately usable within a Tokio runtime context.
+
+### Returns
+
+Returns `io::Result<(Sender, Recver)>` — a tuple of the async write end and async read end, or an OS error if pipe creation fails.
+
+---
+
+## `tokio::Sender`
+
+```rust
+pub struct Sender(/* ... */);
+```
+
+A Tokio-based handle to the **async write end** of an unnamed pipe, produced by [`tokio::pipe()`] alongside its paired [`tokio::Recver`].
+
+### Trait Implementations
+
+| Trait | Notes |
+|---|---|
+| `tokio::io::AsyncWrite` | Core async write interface — use with `AsyncWriteExt::write_all`, etc. |
+| `AsRawHandle` / `AsRawFd` | Obtain the underlying numeric handle/FD |
+| `IntoRawHandle` / `IntoRawFd` | Consume `Sender` and yield the raw handle/FD |
+| `TryFrom<OwnedHandle>` / `TryFrom<OwnedFd>` | Construct from a raw OS handle (may fail if Tokio registration fails) |
+| `TryInto<OwnedHandle>` / `TryInto<OwnedFd>` | Convert back into a raw OS owned handle |
+| `Debug` | Derived |
+
+### Constructing from a Sync `Sender`
+
+The async `Sender` can be obtained from a sync `unnamed_pipe::Sender` via `TryFrom`. This re-registers the underlying handle with the Tokio runtime:
+
+```rust
+use interprocess::unnamed_pipe::{self, tokio as async_pipe};
+
+let (sync_tx, _rx) = unnamed_pipe::pipe()?;
+let async_tx = async_pipe::Sender::try_from(sync_tx)?;
+```
+
+### Converting Back to a Raw Handle
+
+Conversely, the async `Sender` can be converted back into an `OwnedHandle` or `OwnedFd`:
+
+```rust
+// On Unix:
+let owned_fd: std::os::unix::io::OwnedFd = async_tx.try_into()?;
+// On Windows:
+let owned_handle: std::os::windows::io::OwnedHandle = async_tx.try_into()?;
+```
+
+---
+
+## `tokio::Recver`
+
+```rust
+pub struct Recver(/* ... */);
+```
+
+A Tokio-based handle to the **async read end** of an unnamed pipe, produced by [`tokio::pipe()`] alongside its paired [`tokio::Sender`].
+
+### Trait Implementations
+
+| Trait | Notes |
+|---|---|
+| `tokio::io::AsyncRead` | Core async read interface — use with `AsyncBufReadExt::read_line`, etc. |
+| `AsRawHandle` / `AsRawFd` | Obtain the underlying numeric handle/FD |
+| `IntoRawHandle` / `IntoRawFd` | Consume `Recver` and yield the raw handle/FD |
+| `TryFrom<OwnedHandle>` / `TryFrom<OwnedFd>` | Construct from a raw OS handle (may fail if Tokio registration fails) |
+| `TryInto<OwnedHandle>` / `TryInto<OwnedFd>` | Convert back into a raw OS owned handle |
+| `Debug` | Derived |
+
+### Constructing from a Sync `Recver`
+
+Similarly, the async `Recver` can be created from a sync `unnamed_pipe::Recver`:
+
+```rust
+use interprocess::unnamed_pipe::{self, tokio as async_pipe};
+
+let (_tx, sync_rx) = unnamed_pipe::pipe()?;
+let async_rx = async_pipe::Recver::try_from(sync_rx)?;
+```
+
+---
+
+## Example
+
+The following example mirrors the sync pipe example but uses the async Tokio types. Side A creates the pipe, keeps the read end, and hands the write end to side B via a Tokio oneshot channel. In a real deployment, side B would be a child process receiving the handle as a command-line argument.
+
+**Side A (async — creates the pipe, keeps the read end):**
+
+```rust
+use std::{io, os};
+use tokio::sync::oneshot;
+#[cfg(windows)]
+type Handle = os::windows::io::OwnedHandle;
+#[cfg(unix)]
+type Handle = os::unix::io::OwnedFd;
+
+use interprocess::unnamed_pipe::tokio::pipe;
+use tokio::io::{AsyncBufReadExt, BufReader};
+
+async fn side_a(handle_sender: oneshot::Sender<Handle>) -> io::Result<()> {
+    let (tx, rx) = pipe()?;
+
+    // Convert the async Sender back into an OwnedHandle / OwnedFd and send
+    // it to side B. Child processes inherit the handle, so the numeric value
+    // remains valid.
+    let txh = tx.try_into()?;
+    handle_sender.send(txh).unwrap();
+
+    // Async-read the response from side B.
+    let mut buf = String::with_capacity(128);
+    let mut rx = BufReader::new(rx);
+    rx.read_line(&mut buf).await?;
+
+    assert_eq!(buf.trim(), "Hello from side B!");
+    Ok(())
+}
+```
+
+**Side B (async — receives the handle, writes to the pipe):**
+
+```rust
+use std::{io, os};
+#[cfg(windows)]
+type Handle = os::windows::io::OwnedHandle;
+#[cfg(unix)]
+type Handle = os::unix::io::OwnedFd;
+
+use interprocess::unnamed_pipe;
+use tokio::io::AsyncWriteExt;
+
+async fn side_b(handle: Handle) -> io::Result<()> {
+    // Reconstruct the async Sender from the OwnedHandle / OwnedFd.
+    let mut tx = unnamed_pipe::tokio::Sender::try_from(handle)?;
+    tx.write_all(b"Hello from side B!\n").await?;
+    Ok(())
+}
+```
+
+**Wiring them together inside a Tokio runtime:**
+
+```rust
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    use tokio::{sync::oneshot, task};
+
+    let (htx, hrx) = oneshot::channel();
+    let jh = task::spawn(side_a(htx));
+    let handle = hrx.await.unwrap();
+
+    side_b(handle).await?;
+    jh.await.unwrap()
+}
+```
+
+<Warning>
+`tokio::Sender` and `tokio::Recver` register their underlying OS handles with the Tokio runtime during construction. Calling any async methods — or constructing these types via `TryFrom` — outside of a Tokio runtime context will **panic**. Always ensure these types are created and used inside a `#[tokio::main]` function or a `tokio::runtime::Runtime` block.
+</Warning>

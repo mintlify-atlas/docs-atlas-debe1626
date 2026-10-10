@@ -1,0 +1,117 @@
+---
+title: "Async IPC with Tokio in Interprocess"
+sidebarTitle: "Async & Tokio"
+description: "Enable the tokio feature to use async-native local sockets and unnamed pipes that integrate directly with the Tokio runtime and its event loop."
+---
+
+Interprocess includes first-class support for the [Tokio](https://crates.io/crates/tokio) async runtime. When the `tokio` feature is enabled, async variants of local socket listeners, streams, and unnamed pipe endpoints become available. Rather than requiring you to spawn threads just to put an IPC primitive into a blocking wait state, the async types integrate directly with Tokio's event loop and are notified by the OS kernel whenever they are ready to send or receive data — making it straightforward to serve many concurrent IPC clients with minimal resource overhead.
+
+## Enabling Tokio
+
+Add the `tokio` feature to your `Cargo.toml` dependency on Interprocess:
+
+```toml
+[dependencies]
+interprocess = { version = "2.4.4", features = ["tokio"] }
+```
+
+This pulls in Tokio as a dependency and enables all async IPC types. The `tokio` feature is **off by default** to keep compile times and the dependency graph lean for users who only need synchronous IPC.
+
+## Available Async Types
+
+With the `tokio` feature enabled, the following async-capable types are available:
+
+<CardGroup cols={2}>
+  <Card title="local_socket::tokio::Listener" icon="server">
+    Async local socket server. Call `.accept().await` to receive incoming connections. Use
+    `tokio::spawn` to handle each connection concurrently.
+  </Card>
+  <Card title="local_socket::tokio::Stream" icon="plug">
+    Async local socket client connection. Implements `AsyncRead` and `AsyncWrite` (via
+    Tokio's I/O traits). Supports `BufReader` wrapping and concurrent send/receive via
+    `try_join!`.
+  </Card>
+  <Card title="unnamed_pipe::tokio::Sender" icon="arrow-right">
+    Async sending end of an unnamed pipe. Implements `AsyncWrite`. The raw handle/FD is
+    extracted via `TryFrom` for passing to child processes.
+  </Card>
+  <Card title="unnamed_pipe::tokio::Recver" icon="arrow-left">
+    Async receiving end of an unnamed pipe. Implements `AsyncRead`. Supports wrapping with
+    `tokio::io::BufReader` for line-oriented reading.
+  </Card>
+</CardGroup>
+
+## Tokio Prelude
+
+Just as the synchronous API has a `prelude` module, the async API provides one for Tokio types:
+
+```rust
+use interprocess::local_socket::tokio::prelude::*;
+```
+
+This brings `NameType`, `ToFsName`, `ToNsName`, `StreamCommon`, and the async `Listener` and `Stream` traits into scope (as `_`-aliased imports to avoid name collisions), along with `LocalSocketListener` and `LocalSocketStream` as type aliases for the async enum types.
+
+## Important Constraint
+
+<Warning>
+  Async types from Interprocess are **Tokio-specific**. Their methods will **panic** if called
+  outside of a Tokio runtime context. They are not compatible with `async-std`, `smol`, or any
+  other async runtime. If you need support for a different runtime, please open an issue on the
+  [Interprocess GitHub repository](https://github.com/kotauskas/interprocess).
+</Warning>
+
+## Concurrency Pattern
+
+The idiomatic way to handle multiple concurrent clients is to call `listener.accept().await` in a loop and spawn a new Tokio task for each incoming connection. This is the same pattern used by Tokio's own `TcpListener`:
+
+```rust
+use interprocess::local_socket::{
+    tokio::{prelude::*, Stream},
+    GenericNamespaced, ListenerOptions,
+};
+use std::io;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+async fn handle_conn(conn: Stream) -> io::Result<()> {
+    let mut recver = BufReader::new(&conn);
+    let mut sender = &conn;
+
+    let mut buffer = String::with_capacity(128);
+
+    // Send and receive concurrently — both sides must not block each other.
+    let send = sender.write_all(b"Hello from server!\n");
+    let recv = recver.read_line(&mut buffer);
+    tokio::try_join!(recv, send)?;
+
+    drop(conn);
+    print!("Client answered: {buffer}");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let name = "example.sock".to_ns_name::<GenericNamespaced>()?;
+    let listener = ListenerOptions::new().name(name).create_tokio()?;
+
+    loop {
+        let conn = match listener.accept().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Incoming connection error: {e}");
+                continue;
+            }
+        };
+
+        // Hand the connection to an independent async task.
+        tokio::spawn(async move {
+            if let Err(e) = handle_conn(conn).await {
+                eprintln!("Error while handling connection: {e}");
+            }
+        });
+    }
+}
+```
+
+The `tokio::spawn` call moves the connection into an independently scheduled async task. Because `Stream` implements `Send + Sync`, it is safe to share a reference to the stream between a reader half and a writer half within the same task — wrapping the connection in a `BufReader` and using `&conn` for the write side is the standard approach, as shown above.
+
+For a complete worked example, see the [Tokio async guide](/guides/tokio-async).

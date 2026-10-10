@@ -1,0 +1,172 @@
+---
+title: "unnamed_pipe Module: Synchronous Pipe API"
+sidebarTitle: "Overview"
+description: "Reference for interprocess::unnamed_pipe, including the pipe() constructor, Sender, Recver types, handle inheritance, and Windows limbo behavior."
+---
+
+The `unnamed_pipe` module provides OS-level anonymous pipes for one-way, unidirectional communication between processes. Unlike named pipes, unnamed pipes have no filesystem identity — they are only accessible through their handles or file descriptors. Once an endpoint is closed, its end of the pipe is permanently inaccessible. Unnamed pipes are primarily useful for communicating with child processes, since child processes can inherit open handles/FDs from their parent.
+
+## `pipe()` Function
+
+```rust
+pub fn pipe() -> io::Result<(Sender, Recver)>
+```
+
+Creates a new anonymous pipe and returns a `(Sender, Recver)` pair. The `Sender` is the write end and the `Recver` is the read end. Both handles/FDs are inheritable by default, which is the key property that makes parent-to-child communication possible.
+
+The platform-specific builders in the `os` module provide more configuration options if needed.
+
+### Parameters
+
+This function takes no parameters.
+
+### Returns
+
+Returns `io::Result<(Sender, Recver)>` — a tuple of the write end and read end of the new pipe, or an OS error if pipe creation fails.
+
+---
+
+## `Sender`
+
+```rust
+pub struct Sender(/* ... */);
+```
+
+A handle to the **write end** of an unnamed pipe, produced by [`pipe()`] along with its paired [`Recver`].
+
+### Trait Implementations
+
+| Trait | Notes |
+|---|---|
+| `std::io::Write` | Core write interface — use `write_all`, `write`, etc. |
+| `AsRawHandle` / `AsRawFd` | Obtain the underlying numeric handle/FD value |
+| `IntoRawHandle` / `IntoRawFd` | Consume `Sender` and yield the raw handle/FD |
+| `FromRawHandle` / `FromRawFd` | Reconstruct a `Sender` from a raw handle/FD |
+| `From<Sender> for OwnedHandle` | Windows: convert into an owned handle |
+| `From<Sender> for OwnedFd` | Unix: convert into an owned file descriptor |
+| `TryClone` | Duplicate the underlying handle/FD — see [`TryClone` docs](/api/utilities/try-clone) |
+| `Debug` | Derived |
+
+### Handle Inheritance
+
+The file descriptor / handle is **inheritable by default**. Child processes spawned after the pipe is created will receive a copy of the open handle, addressable by the same numeric value. See [Passing Handles to Child Processes](#passing-handles-to-child-processes) for the recommended pattern.
+
+### Windows: Limbo on Drop
+
+On Windows, dropping a `Sender` does **not** immediately discard the contents of the send buffer. Instead, the handle is sent to an internal thread pool ("limbo") which flushes all pending data before closing the handle. This ensures that the receiving end does not encounter a premature `BrokenPipe`/EOF before all sent data has been consumed.
+
+---
+
+## `Recver`
+
+```rust
+pub struct Recver(/* ... */);
+```
+
+A handle to the **read end** of an unnamed pipe, produced by [`pipe()`] along with its paired [`Sender`].
+
+### Trait Implementations
+
+| Trait | Notes |
+|---|---|
+| `std::io::Read` | Core read interface — use `read`, `read_to_end`, etc. |
+| `AsRawHandle` / `AsRawFd` | Obtain the underlying numeric handle/FD value |
+| `IntoRawHandle` / `IntoRawFd` | Consume `Recver` and yield the raw handle/FD |
+| `FromRawHandle` / `FromRawFd` | Reconstruct a `Recver` from a raw handle/FD |
+| `From<Recver> for OwnedHandle` | Windows: convert into an owned handle |
+| `From<Recver> for OwnedFd` | Unix: convert into an owned file descriptor |
+| `TryClone` | Duplicate the underlying handle/FD |
+| `Debug` | Derived |
+
+### Handle Inheritance
+
+Like `Sender`, the file descriptor / handle is **inheritable by default**, enabling a parent process to open the read end and pass the write end (or vice-versa) to a child.
+
+---
+
+## Passing Handles to Child Processes
+
+The typical pattern for sharing an unnamed pipe with a child process:
+
+1. Call `pipe()` in the parent process to obtain a `(Sender, Recver)` pair.
+2. Convert the endpoint you want to hand to the child into an `OwnedHandle` / `OwnedFd` (both `From` implementations are provided).
+3. Read the numeric value with `.as_raw_handle()` / `.as_raw_fd()`.
+4. Pass the numeric value to the child process via a command-line argument, environment variable, or another startup-time IPC mechanism.
+5. In the child process, read the numeric value back and reconstruct the pipe endpoint using `FromRawHandle::from_raw_handle` / `FromRawFd::from_raw_fd`.
+
+This works because child processes inherit open handles/FDs, so the numeric value is the same in both the parent and the child.
+
+---
+
+## Example
+
+The following example demonstrates a parent-side task (side A) and a child-side task (side B) communicating through an unnamed pipe. In a real program, side B would run in a spawned child process, with the handle passed as a command-line argument.
+
+**Side A (parent — creates the pipe, keeps the read end):**
+
+```rust
+use std::{io, os, sync::mpsc};
+#[cfg(windows)]
+type Handle = os::windows::io::OwnedHandle;
+#[cfg(unix)]
+type Handle = os::unix::io::OwnedFd;
+
+use interprocess::unnamed_pipe::pipe;
+use std::io::{prelude::*, BufReader};
+
+fn side_a(handle_sender: mpsc::SyncSender<Handle>) -> io::Result<()> {
+    let (tx, rx) = pipe()?;
+
+    // Convert the sender into an OwnedHandle / OwnedFd and pass it to side B.
+    // Child processes inherit handles/FDs, so the numeric value stays valid.
+    let txh = tx.into();
+    handle_sender.send(txh).unwrap();
+
+    // Read the response from side B via the read end.
+    let mut buf = String::with_capacity(128);
+    let mut rx = BufReader::new(rx);
+    rx.read_line(&mut buf)?;
+
+    assert_eq!(buf.trim(), "Hello from side B!");
+    Ok(())
+}
+```
+
+**Side B (child — receives the handle, writes to the pipe):**
+
+```rust
+use std::{io, os};
+#[cfg(windows)]
+type Handle = os::windows::io::OwnedHandle;
+#[cfg(unix)]
+type Handle = os::unix::io::OwnedFd;
+
+use interprocess::unnamed_pipe;
+use std::io::prelude::*;
+
+fn side_b(handle: Handle) -> io::Result<()> {
+    // Reconstruct the Sender from the OwnedHandle / OwnedFd received from the parent.
+    let mut tx = unnamed_pipe::Sender::from(handle);
+    tx.write_all(b"Hello from side B!\n")?;
+    Ok(())
+}
+```
+
+**Wiring them together (single-process simulation using threads):**
+
+```rust
+use std::{io, sync::mpsc, thread};
+
+fn main() -> io::Result<()> {
+    let (htx, hrx) = mpsc::sync_channel(1);
+    let jh = thread::spawn(move || side_a(htx));
+    let handle = hrx.recv().unwrap();
+
+    side_b(handle)?;
+    jh.join().unwrap()
+}
+```
+
+<Note>
+For the common case of wiring up `stdin`, `stdout`, or `stderr` of a child process, the standard library's [`std::process::Stdio`](https://doc.rust-lang.org/std/process/struct.Stdio.html) provides a simpler, cross-platform API. Use `Stdio` when you can modify the child program to communicate through its standard streams — unnamed pipes are a better fit when you need more direct, non-stdio IPC or when working with processes whose standard streams are already in use.
+</Note>

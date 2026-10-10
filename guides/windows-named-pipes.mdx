@@ -1,0 +1,244 @@
+---
+title: "Windows Named Pipes with Interprocess"
+sidebarTitle: "Named Pipes"
+description: "Use the Interprocess Windows named pipe API to create byte-mode and message-mode pipe servers and clients with full control over pipe configuration."
+---
+
+Windows named pipes are a Windows-native IPC mechanism that predate both Unix domain sockets and the Winsock implementation of them. Interprocess exposes them through the `os::windows::named_pipe` module, giving you fine-grained control over pipe configuration that the higher-level local socket API deliberately abstracts away. This is useful when you need to interoperate with existing Windows software that uses named pipes directly, or when you need features like message framing, remote access, or custom security descriptors.
+
+<Note>
+  Windows named pipes are **entirely unrelated** to Unix FIFO files, which are sometimes also called "named pipes". The two mechanisms have different semantics, different APIs, and do not interoperate. For cross-platform IPC code, use [local sockets](/guides/local-socket-server) instead — they transparently use named pipes on Windows and Unix domain sockets everywhere else.
+</Note>
+
+## Pipe Modes
+
+Every Windows named pipe operates in one of two modes, controlled by `PipeMode`:
+
+- **`PipeMode::Bytes`** — The pipe is a raw byte stream. Message boundaries are not preserved; the receiver reads however many bytes happen to be in the buffer. This behaves like a TCP stream and is the simplest mode to work with.
+
+- **`PipeMode::Messages`** — The pipe preserves message boundaries. Each `send` call corresponds to exactly one logical message, and each `recv_msg` call reads exactly one message, regardless of how many bytes it contains. This is useful for structured protocols where messages have variable length.
+
+The mode is set on the server via `PipeListenerOptions` and must be respected by the client when connecting.
+
+## Creating a Server
+
+Use `PipeListenerOptions` to configure the listener before creating it. The key fields are:
+
+- **`path`** — The pipe name, which must begin with `\\.\pipe\`.
+- **`mode`** — `PipeMode::Bytes` or `PipeMode::Messages`.
+- **`instance_limit`** — Maximum number of simultaneous connections (`None` for unlimited).
+- **`security_descriptor`** — Optional Windows security descriptor for access control.
+
+```rust
+use {
+    interprocess::os::windows::named_pipe::{pipe_mode, PipeListenerOptions},
+    std::path::Path,
+};
+
+let listener = PipeListenerOptions::new()
+    .path(Path::new(r"\\.\pipe\Example"))
+    .create_duplex::<pipe_mode::Bytes>()?;
+```
+
+`create_duplex::<M>()` is a convenience alias for `create::<M, M>()`, which creates a listener whose accepted streams are both readable and writable.
+
+### Full Byte-Mode Server Example
+
+```rust
+use {
+    interprocess::os::windows::named_pipe::{pipe_mode, PipeListenerOptions},
+    std::{
+        io::{prelude::*, BufReader},
+        path::Path,
+    },
+};
+
+fn main() -> std::io::Result<()> {
+    let pipe_name = r"\\.\pipe\Example";
+
+    let listener = PipeListenerOptions::new()
+        .path(Path::new(pipe_name))
+        .create_duplex::<pipe_mode::Bytes>()?;
+
+    // This is a good place to inform clients that the server is ready.
+    eprintln!("Server running at {pipe_name}");
+
+    // This buffer will be reused between clients.
+    let mut buffer = String::with_capacity(128);
+
+    for mut conn in listener
+        .incoming()
+        .filter_map(|conn| conn.map_err(|e| eprintln!("Incoming connection failed: {e}")).ok())
+        .map(BufReader::new)
+    {
+        // Since our client example sends first, the server should receive a
+        // line and only then send a response. Otherwise, because receiving
+        // from and sending to a connection cannot be simultaneous without
+        // threads or async, we can deadlock the two processes by having both
+        // sides wait for the send buffer to be emptied by the other.
+        conn.read_line(&mut buffer)?;
+
+        // Now that the receive has come through and the client is waiting
+        // on the server's send, do it. (.get_mut() is to get the sender,
+        // BufReader doesn't implement a pass-through Write.)
+        conn.get_mut().write_all(b"Hello from server!\n")?;
+
+        // read_line keeps the line feed at the end.
+        print!("Client answered: {buffer}");
+
+        // Clear the buffer so that the next iteration will display new data
+        // instead of messages stacking on top of one another.
+        buffer.clear();
+    }
+    Ok(())
+}
+```
+
+## Connecting a Client — Bytes Mode
+
+The client uses `DuplexPipeStream::<pipe_mode::Bytes>::connect_by_path` to open a connection to a bytes-mode pipe:
+
+```rust
+use {
+    interprocess::os::windows::named_pipe::*,
+    std::io::{prelude::*, BufReader},
+};
+
+fn main() -> std::io::Result<()> {
+    let name = r"\\.\pipe\Example";
+    let mut buffer = String::with_capacity(128);
+
+    // Will fail immediately if the server hasn't started yet.
+    let mut conn = BufReader::new(DuplexPipeStream::<pipe_mode::Bytes>::connect_by_path(name)?);
+
+    // BufReader doesn't pass Write through, so we use get_mut.
+    conn.get_mut().write_all(b"Hello from client!\n")?;
+
+    // We now employ the buffer we allocated prior and receive a single line,
+    // interpreting a newline character as an end-of-file (because named pipes
+    // have no concept of partial shutdown), verifying validity of UTF-8 on
+    // the fly.
+    conn.read_line(&mut buffer)?;
+
+    // Avoid holding up resources.
+    drop(conn);
+
+    // read_line keeps the line feed at the end.
+    print!("Server answered: {buffer}");
+    Ok(())
+}
+```
+
+## Message Mode
+
+In message mode, use `DuplexPipeStream::<pipe_mode::Messages>` and the `send` / `recv_msg` API from the `recvmsg` crate. Message boundaries are preserved end-to-end.
+
+```rust
+use {interprocess::os::windows::named_pipe::*, recvmsg::prelude::*};
+
+fn main() -> std::io::Result<()> {
+    let name = r"\\.\pipe\Example";
+
+    // The right size depends on the specifics of the protocol in use.
+    let mut buffer = MsgBuf::from(Vec::with_capacity(128));
+
+    // Will fail immediately if the server hasn't started yet.
+    let mut conn = DuplexPipeStream::<pipe_mode::Messages>::connect_by_path(name)?;
+
+    // Here's our message so that we can check the length of sent data.
+    const MESSAGE: &[u8] = b"Hello from client!";
+    // Send the message, getting the amount of bytes that was actually sent in return.
+    let sent = conn.send(MESSAGE)?;
+    // If the length doesn't match, something is seriously wrong.
+    assert_eq!(sent, MESSAGE.len());
+
+    // Use the reliable message receive API, which gets us a RecvResult
+    // from the recvmsg crate.
+    conn.recv_msg(&mut buffer, None)?;
+
+    // Avoid holding up resources.
+    drop(conn);
+
+    // Convert the data that's been received into a string. This checks for
+    // UTF-8 validity, and if invalid characters are found, a new buffer
+    // is allocated to house a modified version of the received data, where
+    // decoding errors are replaced with those diamond-shaped question mark
+    // U+FFFD REPLACEMENT CHARACTER thingies: .
+    let received_string = String::from_utf8_lossy(buffer.filled_part());
+
+    println!("Server answered: {received_string}");
+    Ok(())
+}
+```
+
+The key differences from bytes mode:
+- `conn.send(bytes)` replaces `write_all` — it sends an atomic message and returns the number of bytes sent.
+- `conn.recv_msg(&mut buffer, None)` replaces `read_line` — it reads exactly one complete message into a `MsgBuf`.
+- `BufReader` is not used, because buffered line reading doesn't compose well with message framing.
+
+## Tokio Variants
+
+The `os::windows::named_pipe::tokio` module provides async versions of all the pipe types. The API mirrors the sync API with `.await` added to blocking calls:
+
+```rust
+use {
+    interprocess::os::windows::named_pipe::{pipe_mode, tokio::*, PipeListenerOptions},
+    std::{io, path::Path},
+    tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        try_join,
+    },
+};
+
+async fn handle_conn(conn: DuplexPipeStream<pipe_mode::Bytes>) -> io::Result<()> {
+    let [mut recver, mut sender] = [&conn; 2];
+    let mut buffer = String::with_capacity(128);
+
+    let send = async {
+        sender.write_all(b"Hello from server!").await?;
+        // Make sure Tokio flushes its internal buffer.
+        sender.shutdown().await?;
+        Ok(())
+    };
+    let recv = recver.read_to_string(&mut buffer);
+
+    try_join!(recv, send)?;
+
+    drop(conn);
+    println!("Client answered: {buffer}");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pipe_name = r"\\.\pipe\Example";
+
+    let listener = PipeListenerOptions::new()
+        .path(Path::new(pipe_name))
+        .create_tokio_duplex::<pipe_mode::Bytes>()?;
+
+    eprintln!(r"Server running at {pipe_name}");
+
+    loop {
+        let conn = match listener.accept().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("There was an error with an incoming connection: {e}");
+                continue;
+            }
+        };
+
+        tokio::spawn(async move {
+            if let Err(e) = handle_conn(conn).await {
+                eprintln!("error while handling connection: {e}");
+            }
+        });
+    }
+}
+```
+
+Note: the Tokio named-pipe API requires both the `tokio` Cargo feature and compilation for Windows (`#[cfg(windows)]`).
+
+<Tip>
+  If you are writing code that must run on both Windows and Unix, use the [local socket API](/guides/local-socket-server) rather than the Windows named pipe API. Local sockets automatically use named pipes on Windows and Unix domain sockets on Linux/macOS, with zero platform-specific code on your part.
+</Tip>

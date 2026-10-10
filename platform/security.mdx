@@ -1,0 +1,233 @@
+---
+title: "Security and Access Control in Interprocess"
+sidebarTitle: "Security"
+description: "Understand peer credential verification and Windows security descriptors in Interprocess for authentication and access control in IPC applications."
+---
+
+IPC channels cross process boundaries, which means trust must be established before sensitive data
+is exchanged. Interprocess provides two complementary mechanisms: **peer credential verification**
+(available on both Unix and Windows) for authenticating who is on the other end of a connection,
+and **Windows security descriptors** for controlling which security principals are allowed to
+connect to a named pipe server in the first place.
+
+<Warning>
+  Credential-based security decisions are subject to race conditions. A process can exit
+  between the moment its credentials are captured and the moment you act on them, and its PID
+  can be immediately reused by a different process. Always design your authentication protocol
+  so that a credential mismatch causes a safe failure rather than a dangerous escalation.
+</Warning>
+
+## Peer Credentials (Unix)
+
+On Unix-like platforms the kernel records the credentials of the connecting process at the moment
+the connection is established. Interprocess surfaces these through the `PeerCreds` struct, obtained
+by calling `.peer_creds()` on a stream.
+
+### Available fields
+
+| Method | Return type | Availability |
+|---|---|---|
+| `pid()` | `Option<pid_t>` | Linux, Android, Fuchsia, Redox, OpenBSD, FreeBSD, NetBSD |
+| `euid()` | `Option<uid_t>` | All Unix platforms (ucred-based, xucred-based, NetBSD) |
+| `egid()` | `Option<gid_t>` | ucred-based platforms (Linux, Android, Fuchsia, Redox, OpenBSD), NetBSD |
+| `groups()` | `Option<&[gid_t]>` | xucred-based platforms (FreeBSD, DragonFly BSD, macOS, iOS, tvOS, watchOS) |
+
+The underlying OS structures vary by platform:
+
+- **`ucred`-based** — Linux (including Android), OpenBSD, Fuchsia, Redox: `SO_PEERCRED` /
+  `getsockopt(SOL_SOCKET, SO_PEERCRED)`
+- **`xucred`-based** — FreeBSD, DragonFly BSD, Darwin (macOS, iOS, tvOS, watchOS):
+  `LOCAL_PEERCRED`
+- **NetBSD** — `unpcbid` via `LOCAL_PEEREID`
+
+### When are credentials captured?
+
+Credentials reflect the state of the peer process **at connection time**:
+
+- **Clients** — credentials are captured when `connect()` succeeds.
+- **Servers** — credentials are captured when the client calls `connect()` (i.e. the server
+  receives them via `accept()`).
+- **OpenBSD / NetBSD** — credentials are captured at `bind()` time on the server side.
+
+### Usage example
+
+```rust
+use interprocess::local_socket::{
+    GenericNamespaced, ListenerOptions, ToNsName,
+    traits::{Listener, Stream},
+};
+
+// Server side
+let name = "my-service".to_ns_name::<GenericNamespaced>()?;
+let listener = ListenerOptions::new().name(name.borrow()).create_sync()?;
+
+for stream in listener.incoming().flatten() {
+    let creds = stream.peer_creds()?;
+
+    // Reject connections from root (uid 0) as an example policy
+    #[cfg(unix)]
+    if creds.euid() == Some(0) {
+        eprintln!("rejected connection from root");
+        continue;
+    }
+
+    if let Some(pid) = creds.pid() {
+        println!("accepted connection from PID {pid}");
+    }
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+## Peer Credentials (Windows)
+
+On Windows the kernel exposes a much narrower set of peer credentials. The `PeerCreds` struct
+contains only the **process ID** of the connecting client — there is no UID or GID concept in the
+Win32 security model.
+
+```rust
+// Windows PeerCreds — only pid() is available
+pub struct PeerCreds {
+    pub(crate) pid: u32,
+}
+
+impl PeerCreds {
+    pub fn pid(&self) -> Option<u32> {
+        Some(self.pid)
+    }
+}
+```
+
+### Usage example
+
+```rust
+use interprocess::local_socket::traits::Stream;
+
+// Assuming `stream` is an accepted LocalSocketStream on Windows:
+let creds = stream.peer_creds()?;
+if let Some(pid) = creds.pid() {
+    println!("connected peer PID: {pid}");
+}
+```
+
+<Note>
+  Windows does not provide an equivalent to Unix UID/GID over named pipes. If you need to
+  authenticate a Windows peer's identity beyond the PID, open the peer's process handle with
+  `OpenProcess` and call `OpenProcessToken` + `GetTokenInformation` to retrieve its SID or
+  integrity level — this is outside the scope of Interprocess.
+</Note>
+
+## Windows Security Descriptors
+
+Interprocess exposes a safe Rust wrapper around the Win32
+[`SECURITY_DESCRIPTOR`](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-security_descriptor)
+type in the `interprocess::os::windows::security_descriptor` module. A security descriptor placed
+on a named pipe listener controls which users and groups are allowed to connect.
+
+### `SecurityDescriptor` type
+
+`SecurityDescriptor` stores an **absolute-format** security descriptor and owns all contained ACLs
+and SIDs on the local heap. It is `Send + Sync`.
+
+#### Constructors
+
+```rust
+use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+
+// Create a default (empty) security descriptor
+let sd = SecurityDescriptor::new()?;
+
+// Deserialize from an SDDL string
+// See: https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-string-format
+use widestring::u16cstr;
+let sd = SecurityDescriptor::deserialize(u16cstr!("D:(A;;GA;;;WD)"))?;
+//                                                  ^  DACL: allow everyone generic-all
+```
+
+#### Attaching to a named pipe listener
+
+Pass the security descriptor through `PipeListenerOptions::security_descriptor`:
+
+```rust
+use interprocess::os::windows::{
+    named_pipe::{pipe_mode, PipeListenerOptions},
+    security_descriptor::SecurityDescriptor,
+};
+use widestring::u16cstr;
+
+// Allow only the current user (DA = default account) and SYSTEM full access
+let sd = SecurityDescriptor::deserialize(
+    u16cstr!("D:(A;;GA;;;DA)(A;;GA;;;SY)")
+)?;
+
+let listener = PipeListenerOptions::new()
+    .path(r"\\.\pipe\my-secure-pipe")
+    .security_descriptor(Some(sd))
+    .create_duplex::<pipe_mode::Bytes>()?;
+```
+
+The `security_descriptor` field on `PipeListenerOptions` is of type
+`Option<SecurityDescriptor>`. When `None`, the named pipe inherits the default security descriptor
+from the process token.
+
+#### Extension traits
+
+Two extension traits provide ergonomic access to security descriptor internals:
+
+- **`AsSecurityDescriptorExt`** — read access: `dacl()`, `sacl()`, `owner()`, `group()`,
+  `control_and_revision()`, `serialize()`, `to_owned_sd()`
+- **`AsSecurityDescriptorMutExt`** — write access: `set_dacl()`, `set_sacl()`, `set_owner()`,
+  `set_group()`, `remove_acls()`, `remove_sids()`, `free_contents()`, `set_control()`
+
+```rust
+use interprocess::os::windows::security_descriptor::{
+    AsSecurityDescriptorExt, SecurityDescriptor,
+};
+
+let sd = SecurityDescriptor::new()?;
+let (control_bits, revision) = sd.control_and_revision()?;
+println!("SD revision: {revision}, control: {control_bits:#06x}");
+```
+
+<Note>
+  For a detailed walkthrough of constructing a security descriptor in C++ (directly applicable as
+  a conceptual guide when using the Rust wrappers), see the Microsoft Learn article
+  [Creating a Security Descriptor for a New Object](https://learn.microsoft.com/en-us/windows/win32/secauthz/creating-a-security-descriptor-for-a-new-object-in-c--).
+</Note>
+
+## Socket File Permissions (Unix)
+
+When `GenericFilePath` or `GenericNamespaced` (on non-Linux Unix) creates a Unix domain socket,
+the socket **appears as a file** in the filesystem. Standard Unix DAC (discretionary access
+control) permissions apply: the `mode` bits on the socket file determine who may connect.
+
+Interprocess automatically **deletes the socket file when the listener is dropped** (name
+reclamation), so you do not need to handle cleanup manually on normal shutdown. On an abnormal exit
+(e.g. `SIGKILL`) the file is left behind; a subsequent listener creation call will reclaim it.
+
+To restrict access to a specific user or group, set the `umask` before creating the listener, or
+`chmod` / `chown` the socket file after creation using standard `std::fs` facilities.
+
+## Important Caveats
+
+<Accordion title="PID reuse race condition">
+
+After a peer connection is accepted, the remote process may exit. Its PID can then be immediately
+reassigned by the kernel to a completely different process. If your security policy looks up
+attributes by PID (e.g. reading `/proc/<pid>/status` on Linux), **perform all lookups before
+trusting any result**, and ideally perform the lookup more than once and compare, since a
+sufficiently fast attacker could occupy the PID between two successive lookups.
+
+This risk is inherent in the Unix credential model and cannot be fully mitigated by Interprocess.
+The most robust approach is to use the UID/GID directly and avoid PID-based lookups altogether.
+
+</Accordion>
+
+<Accordion title="Credentials reflect connection-time identity">
+
+The UID and GID captured in `PeerCreds` are those that were effective **at the time the connection
+was made**, not the current identity of the process. If the peer called `setuid(2)`, `setgid(2)`,
+or a related syscall after connecting, its current credentials will differ from those stored in
+`PeerCreds`. Design your protocol to authenticate once at connection setup and re-verify if the
+session is long-lived.
+
+</Accordion>

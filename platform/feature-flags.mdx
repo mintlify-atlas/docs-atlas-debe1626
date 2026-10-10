@@ -1,0 +1,101 @@
+---
+title: "Cargo Feature Flags for Interprocess"
+sidebarTitle: "Feature Flags"
+description: "Configure Interprocess with Cargo feature flags. Enable the tokio feature for async support or doc_cfg for documentation builds with nightly cfg annotations."
+---
+
+Interprocess uses Cargo feature flags to keep the dependency tree minimal. **All features are off by default**, so you only pull in dependencies for the capabilities you actually use. The table below describes every available feature, its purpose, and its downstream effects.
+
+## Available Features
+
+| Feature    | Description                                                                                                   | Enables                              |
+|------------|---------------------------------------------------------------------------------------------------------------|--------------------------------------|
+| `tokio`    | Enables async-native local socket and unnamed pipe types backed by the [Tokio](https://tokio.rs/) runtime.    | `dep:tokio` (with `sync`, `rt`, `net`, `time`, `io-util`, `macros`), `async` |
+| `async`    | Internal feature enabled transitively when `tokio` is enabled. Pulls in `futures-core`. Not intended for direct use. | `futures-core`                  |
+| `doc_cfg`  | Enables the nightly-only `#[doc(cfg(...))]` annotations so platform-specific items are labelled on docs.rs.  | *(no extra dependencies)*            |
+
+### `tokio`
+
+Gating async I/O behind this feature means synchronous-only applications never pay for the Tokio
+runtime. When enabled, the following additional types become available:
+
+- Async variants of `LocalSocketStream` and `LocalSocketListener` (via Tokio's async I/O traits)
+- Async unnamed pipe reader/writer types
+
+The feature activates `tokio` with a carefully chosen minimal subset of its feature flags:
+
+```toml
+# What Interprocess activates internally
+tokio = { version = "1.36.0", features = [
+    "sync",
+    "rt",
+    "net",
+    "time",
+    "io-util",
+    "macros",
+] }
+```
+
+### `async`
+
+This feature is an implementation detail used to share code between potential future async backends.
+It is activated automatically when `tokio` is enabled. **Do not enable it directly** — its
+behaviour is unspecified and may change without a semver-bump.
+
+### `doc_cfg`
+
+When this feature is enabled, items that are only available on certain platforms or behind certain
+features are annotated with `#[doc(cfg(...))]` badges in the generated documentation. This is
+exactly the combination used by the [docs.rs](https://docs.rs/interprocess) build:
+
+```toml
+# From Cargo.toml [package.metadata.docs.rs]
+features = ["doc_cfg", "tokio"]
+```
+
+<Note>
+  `doc_cfg` requires a **nightly compiler** because it relies on the unstable
+  `#![feature(doc_cfg)]` attribute. Never enable it in a library or application that must compile
+  on stable Rust — it is only appropriate in documentation builds (e.g. a `docs.rs` override or a
+  local `cargo +nightly doc` invocation).
+</Note>
+
+## Enabling Features
+
+### In a regular crate
+
+Add Interprocess to your `Cargo.toml` and list the features you want:
+
+```toml
+[dependencies]
+interprocess = { version = "2", features = ["tokio"] }
+```
+
+If you only need synchronous IPC, omit the `features` key entirely:
+
+```toml
+[dependencies]
+interprocess = "2"
+```
+
+### In a Cargo workspace
+
+Declare the dependency once in the workspace manifest and inherit it in member crates:
+
+```toml
+# Cargo.toml (workspace root)
+[workspace.dependencies]
+interprocess = { version = "2", features = ["tokio"] }
+
+# crates/my-server/Cargo.toml
+[dependencies]
+interprocess = { workspace = true }
+```
+
+<Tip>
+  If you are building a concurrent server that accepts many connections simultaneously, enable the
+  `tokio` feature and use the async `LocalSocketListener` together with a multi-threaded Tokio
+  runtime (`#[tokio::main]` or `Runtime::new()`). This lets each accepted connection be driven
+  concurrently without spawning an OS thread per client, dramatically reducing memory overhead at
+  scale.
+</Tip>

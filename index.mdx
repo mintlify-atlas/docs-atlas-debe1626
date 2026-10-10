@@ -1,20 +1,62 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Interprocess: Cross-Platform IPC for Rust"
+sidebarTitle: "Home"
+description: "Interprocess is a Rust library for cross-platform interprocess communication. Local sockets, unnamed pipes, FIFO files, and Windows named pipes — one unified API."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Interprocess gives Rust programs a unified, ergonomic interface for interprocess communication across Windows, Linux, macOS, and other Unix-like platforms. Whether you need a simple parent-to-child pipe or a full client-server local socket architecture with async Tokio support, Interprocess has you covered.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="bolt" href="/quickstart">
+    Get two processes talking in under five minutes with a working local socket example.
+  </Card>
+  <Card title="Installation" icon="box" href="/installation">
+    Add Interprocess to your Cargo.toml and configure the optional Tokio feature gate.
+  </Card>
+  <Card title="Core Concepts" icon="lightbulb" href="/concepts/local-sockets">
+    Understand local sockets, unnamed pipes, and the cross-platform dispatch model.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/local-socket/overview">
+    Explore every public type, trait, and function in the Interprocess API.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## Communication Primitives
+
+Interprocess provides both cross-platform abstractions and OS-specific interfaces for IPC.
+
+<CardGroup cols={2}>
+  <Card title="Local Sockets" icon="plug" href="/concepts/local-sockets">
+    The flagship primitive. A better alternative to `localhost` TCP — faster, with OS-enforced identity and user-friendly names. Backed by Unix domain sockets on Unix and named pipes on Windows.
+  </Card>
+  <Card title="Unnamed Pipes" icon="arrow-right" href="/concepts/unnamed-pipes">
+    Lightweight unidirectional pipes for communicating with child processes. Inheritable handles make passing endpoints easy.
+  </Card>
+  <Card title="Async with Tokio" icon="bolt" href="/concepts/async-tokio">
+    Enable the `tokio` feature to get async-native versions of all local socket and pipe types that integrate directly with the Tokio runtime.
+  </Card>
+  <Card title="Platform Support" icon="globe" href="/concepts/platform-support">
+    Explicit support for Windows, Linux, macOS, FreeBSD, Android, and more. OS-specific extensions are gated behind `#[cfg]` to produce compile errors on unsupported platforms.
+  </Card>
+</CardGroup>
+
+## Guides
+
+<CardGroup cols={2}>
+  <Card title="Build a Local Socket Server" icon="server" href="/guides/local-socket-server">
+    Create a multi-client server that listens for connections and handles them synchronously.
+  </Card>
+  <Card title="Connect a Local Socket Client" icon="link" href="/guides/local-socket-client">
+    Write a client that connects to a local socket server and exchanges messages.
+  </Card>
+  <Card title="Async Local Sockets with Tokio" icon="rotate" href="/guides/tokio-async">
+    Build a non-blocking server and client using Tokio, handling many clients concurrently.
+  </Card>
+  <Card title="Windows Named Pipes" icon="windows" href="/guides/windows-named-pipes">
+    Use the low-level Windows named pipe API for byte-stream and message-mode pipes.
+  </Card>
+</CardGroup>
+
+<Note>
+  **New to IPC?** Start with [Local Sockets](/concepts/local-sockets) — they are the recommended primitive for the vast majority of use cases and work identically across all supported platforms.
+</Note>

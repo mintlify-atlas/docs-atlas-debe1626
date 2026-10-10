@@ -1,0 +1,114 @@
+---
+title: "os::unix::fifo_file: FIFO File Creation API"
+sidebarTitle: "FIFO Files"
+description: "API reference for os::unix::fifo_file::create_fifo, the Interprocess function for creating FIFO files (Unix named pipes) at a given filesystem path."
+---
+
+The `os::unix::fifo_file` module provides the `create_fifo()` function for creating FIFO special files — sometimes called "Unix named pipes" — on Unix-based systems. A FIFO file is a filesystem object that establishes a synchronous, unidirectional, pipe-like connection between exactly two processes: one reader and one writer. Unlike unnamed pipes, the two processes do not need to share a parent-child relationship; they only need to agree on a filesystem path.
+
+<Note>
+This module is **Unix-only** and is conditionally compiled with `#[cfg(unix)]`. It will not compile on Windows. For Windows-compatible named pipe functionality, see [`os::windows::named_pipe`](/api/os/windows-named-pipes).
+</Note>
+
+---
+
+## `create_fifo()` Function
+
+```rust
+pub fn create_fifo<P: AsRef<Path>>(path: P, mode: mode_t) -> io::Result<()>
+```
+
+Creates a FIFO special file at the given filesystem path with the given Unix permission bits. Internally, this calls the `mkfifo(2)` system call.
+
+### Parameters
+
+<ParamField path="path" type="P: AsRef<Path>" required>
+  The filesystem path at which the FIFO file will be created. The parent directory must exist. This can be any type that implements `AsRef<std::path::Path>`, including `&str`, `String`, `PathBuf`, and `&Path`.
+</ParamField>
+
+<ParamField path="mode" type="mode_t" required>
+  Unix permission bits for the new FIFO file (e.g. `0o666` or `0o777`). The actual permissions applied will be the result of `mode & ~umask`, where `umask` is the calling process's current file creation mask. It is usually safe to pass `0o777` and let the `umask` narrow the permissions as configured by the user or system.
+</ParamField>
+
+### Returns
+
+Returns `io::Result<()>`. On success, the FIFO file exists at `path` and is ready to be opened. On failure, returns an `io::Error` wrapping the underlying `errno` value (e.g. `EEXIST` if the path already exists, `ENOENT` if the parent directory does not exist, `EACCES` for permission errors).
+
+### System Call
+
+This function is a thin wrapper around [`mkfifo(3)`](https://pubs.opengroup.org/onlinepubs/9699919799/utilities/mkfifo.html). The path is converted to a null-terminated C string before being passed to the system call.
+
+### Deletion
+
+To remove a FIFO file when it is no longer needed, use the standard library's [`std::fs::remove_file`](https://doc.rust-lang.org/std/fs/fn.remove_file.html):
+
+```rust
+std::fs::remove_file("/tmp/my-fifo")?;
+```
+
+---
+
+## Usage Pattern
+
+After creating a FIFO, open it with standard `File` APIs. The key behavioral property is **blocking at open time**: both the reader and the writer will block on their respective `open` calls until the other side has also opened the same FIFO. This rendezvous ensures both ends are ready before any I/O begins.
+
+1. **Create the FIFO** once, before either process opens it.
+2. **Reader** — open the FIFO with `File::open()` (read-only). Blocks until a writer opens it.
+3. **Writer** — open the FIFO with `OpenOptions::new().write(true).open()`. Blocks until a reader opens it.
+4. **Communicate** — use the resulting `File` handles as you would with any file or pipe.
+5. **Clean up** — delete the FIFO with `std::fs::remove_file` when done.
+
+---
+
+## Example
+
+```rust
+use interprocess::os::unix::fifo_file::create_fifo;
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, BufRead, BufReader, Write},
+    thread,
+};
+
+fn main() -> io::Result<()> {
+    let path = "/tmp/my-interprocess-fifo";
+
+    // Create the FIFO. Permissions are masked by the process umask.
+    create_fifo(path, 0o777)?;
+
+    // Spawn a writer thread. File::open on the reader side and
+    // OpenOptions::write on the writer side will both block until
+    // the other end is ready.
+    let writer_thread = thread::spawn(move || -> io::Result<()> {
+        let mut file = OpenOptions::new().write(true).open(path)?;
+        file.write_all(b"Hello from the writer!\n")?;
+        Ok(())
+    });
+
+    // Open the read end (blocks until the writer thread opens the write end).
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    assert_eq!(line.trim(), "Hello from the writer!");
+
+    writer_thread.join().unwrap()?;
+
+    // Clean up the FIFO file from the filesystem.
+    fs::remove_file(path)?;
+    Ok(())
+}
+```
+
+---
+
+## Limitations
+
+- **Exactly two processes**: A FIFO is designed for one reader and one writer at a time.
+  - If multiple processes read from the same FIFO concurrently, they compete for the incoming data in an unspecified manner.
+  - If multiple processes write to the same FIFO concurrently, their output is interleaved unpredictably (subject only to OS-specific atomicity guarantees for small writes, typically `PIPE_BUF` bytes).
+- **No random access**: FIFOs behave like pipes — data is strictly sequential and cannot be seeked.
+- **Synchronous open**: Both ends must open the FIFO before either can proceed. This can be a feature (rendezvous) or a drawback (deadlock risk if one side never opens).
+
+If you need multi-client, full-duplex, or more robust IPC, consider using [`local_socket`](/api/local-socket/overview) or [Unix domain sockets](https://doc.rust-lang.org/std/os/unix/net/index.html) instead.

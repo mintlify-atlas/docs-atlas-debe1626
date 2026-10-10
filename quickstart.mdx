@@ -1,47 +1,191 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Interprocess in 5 Minutes"
+sidebarTitle: "Quickstart"
+description: "Build a working local socket server and client in Rust using Interprocess. Covers installation, naming, listening, and connecting in under 5 minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+This page walks you through building a complete, working IPC example using **local sockets** — the flagship primitive in Interprocess. By the end you will have a server process that listens for connections and echoes a reply, and a client process that connects, sends a message, and reads the response. The entire thing runs in under five minutes and requires nothing beyond a standard Rust toolchain.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Add Interprocess to Cargo.toml">
+    Open your project's `Cargo.toml` and add `interprocess` as a dependency:
 
-    ```bash
-    npm install your-package
+    ```toml
+    [dependencies]
+    interprocess = "2.4.4"
+    ```
+
+    If you want async support via Tokio, add the feature flag instead:
+
+    ```toml
+    [dependencies]
+    interprocess = { version = "2.4.4", features = ["tokio"] }
+    ```
+
+    Then run `cargo build` to fetch and compile the crate.
+  </Step>
+
+  <Step title="Write the server">
+    Create `src/bin/server.rs` (or use `fn main()` in any binary) with the following code. This server listens for incoming connections, reads a line from each client, and writes a reply.
+
+    ```rust
+    fn main() -> std::io::Result<()> {
+        use {
+            interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions},
+            std::io::{self, prelude::*, BufReader},
+        };
+
+        let printname = "example.sock";
+        let name = printname.to_ns_name::<GenericNamespaced>()?;
+
+        let listener = match ListenerOptions::new().name(name).create_sync() {
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+                // When a program that uses a file-type socket name terminates
+                // its socket server without deleting the file, a "corpse socket"
+                // remains, which can neither be connected to nor reused by a new
+                // listener. Normally, Interprocess takes care of this on affected
+                // platforms by deleting the socket file when the listener is
+                // dropped. (This is vulnerable to all sorts of races and thus can
+                // be disabled.)
+                //
+                // In a real program, instead of leaving it up to the user
+                // to perform cleanup, one would use the .try_overwrite(true)
+                // listener option to try to replace the socket.
+                eprintln!(
+                    "Error: could not start server because the socket file is \
+                    occupied. Please check if {printname} is in use by another \
+                    process and try again."
+                );
+                return Err(e);
+            }
+            x => x?,
+        };
+
+        // This is a good place to inform clients that the server is ready.
+        eprintln!("Server running at {printname}");
+
+        // This buffer will be reused between clients.
+        let mut buffer = String::with_capacity(128);
+
+        for mut conn in listener
+            .incoming()
+            .filter_map(|conn| conn.map_err(|e| eprintln!("Incoming connection failed: {e}")).ok())
+            .map(BufReader::new)
+        {
+            // Since our client example sends first, the server should receive a
+            // line and only then send a response. Otherwise, because receiving
+            // from and sending to a connection cannot be simultaneous without
+            // threads or async, we can deadlock the two processes by having both
+            // sides wait for the send buffer to be emptied by the other.
+            conn.read_line(&mut buffer)?;
+
+            // Now that the receive has come through and the client is waiting
+            // on the server's send, do it. (`.get_mut()` is to get the sender,
+            // `BufReader` doesn't implement a pass-through `Write`.)
+            conn.get_mut().write_all(b"Hello from server!\n")?;
+
+            // Avoid holding up resources.
+            drop(conn);
+
+            // read_line keeps the line feed at the end.
+            print!("Client answered: {buffer}");
+
+            // Clear the buffer so that the next iteration will display new data
+            // instead of messages stacking on top of one another.
+            buffer.clear();
+        }
+        Ok(())
+    }
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
+  <Step title="Write the client">
+    Create `src/bin/client.rs`. The client connects to the same socket name, sends a line, and reads the server's reply.
+
+    ```rust
+    fn main() -> std::io::Result<()> {
+        use {
+            interprocess::local_socket::{prelude::*, GenericFilePath, GenericNamespaced, Stream},
+            std::io::{prelude::*, BufReader},
+        };
+
+        let name = if GenericNamespaced::is_supported() {
+            "example.sock".to_ns_name::<GenericNamespaced>()?
+        } else {
+            "/tmp/example.sock".to_fs_name::<GenericFilePath>()?
+        };
+
+        let mut buffer = String::with_capacity(128);
+
+        // Will fail immediately if the server hasn't started yet.
+        let mut conn = BufReader::new(Stream::connect(name)?);
+
+        // BufReader doesn't pass Write through, so we use get_mut.
+        conn.get_mut().write_all(b"Hello from client!\n")?;
+
+        // We now employ the buffer we allocated prior and receive a single line,
+        // interpreting a newline character as an end-of-file (because local
+        // sockets cannot be portably shut down), verifying validity of UTF-8 on
+        // the fly.
+        conn.read_line(&mut buffer)?;
+
+        // Avoid holding up resources.
+        drop(conn);
+
+        // read_line keeps the line feed at the end.
+        print!("Server answered: {buffer}");
+        Ok(())
+    }
     ```
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Run both processes">
+    Open two terminal windows. In the first, start the server:
 
     ```bash
-    your-cli start
+    cargo run --bin server
     ```
+
+    You should see:
+
+    ```
+    Server running at example.sock
+    ```
+
+    In the second terminal, run the client:
+
+    ```bash
+    cargo run --bin client
+    ```
+
+    The client prints:
+
+    ```
+    Server answered: Hello from server!
+    ```
+
+    And back in the server terminal you will see:
+
+    ```
+    Client answered: Hello from client!
+    ```
+
+    The server keeps running and will accept another connection the next time you run the client.
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## How `GenericNamespaced` resolves socket names
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+The `GenericNamespaced` name type provides a single portable name string that maps to the most appropriate underlying socket path on each platform:
+
+| Platform | Resolved name |
+|---|---|
+| **Linux** | Abstract namespace socket (e.g. `\0example.sock`) — lives entirely in kernel memory, no filesystem entry |
+| **Windows** | Named pipe path (`\\.\pipe\example.sock`) — the conventional Windows IPC namespace |
+| **macOS / other Unix** | Filesystem path under `/tmp/` (e.g. `/tmp/example.sock`) |
+
+The client example above uses `GenericNamespaced::is_supported()` to detect platforms that do not support abstract namespaces and falls back to an explicit `/tmp/` filesystem path via `GenericFilePath`. In most cases you can rely on `GenericNamespaced` alone and let Interprocess handle the mapping for you.
+
+<Note>
+  The synchronous server in this example handles one client at a time. For a concurrent server that accepts many clients simultaneously, enable the `tokio` feature and see the async Tokio guide — Tokio's event loop lets a single task service many connections without spawning a thread per client.
+</Note>

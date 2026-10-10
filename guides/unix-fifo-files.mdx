@@ -1,0 +1,104 @@
+---
+title: "FIFO Files on Unix with Interprocess"
+sidebarTitle: "FIFO Files"
+description: "Create and use FIFO files (Unix named pipes) with Interprocess's create_fifo() function for communicating with programs that expect FIFO-based IPC."
+---
+
+FIFO files — also called Unix named pipes — are a Unix filesystem primitive that lets two unrelated processes communicate through what appears to be a special file. One process opens the FIFO for reading, another opens it for writing, and data written by the writer comes out of the reader in order (first-in, first-out, hence the name). They are useful for communicating with legacy programs, shell scripts, or any tool that expects to read from or write to a path in the filesystem.
+
+<Warning>
+  FIFO files are a niche mechanism with significant limitations. For general-purpose IPC between Rust processes, use [local sockets](/guides/local-socket-server) instead — they are cross-platform, support bidirectional communication, and do not suffer from the single-reader/single-writer restriction described below.
+</Warning>
+
+## Creating a FIFO
+
+Interprocess provides `create_fifo` in the `os::unix::fifo_file` module. It wraps the POSIX `mkfifo` system call:
+
+```rust
+use interprocess::os::unix::fifo_file::create_fifo;
+use std::path::Path;
+
+create_fifo("/tmp/my_fifo", 0o777)?;
+```
+
+The function signature is:
+
+```rust
+pub fn create_fifo<P: AsRef<Path>>(path: P, mode: mode_t) -> io::Result<()>
+```
+
+- **`path`** — The filesystem path where the FIFO entry will be created. The parent directory must exist and be writable.
+- **`mode`** — A Unix permission bitmask (see [The `mode` parameter](#the-mode-parameter) below).
+
+After this call succeeds, the path exists in the filesystem as a special file of type FIFO. No data can flow through it until both a reader and a writer open it.
+
+## Opening a FIFO
+
+FIFO files are opened with the standard `std::fs` API — no special Interprocess types are needed for reading and writing:
+
+```rust
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+
+// Reading side — blocks until a writer also opens the FIFO.
+let reader = BufReader::new(File::open("/tmp/my_fifo")?);
+
+// Writing side — blocks until a reader also opens the FIFO.
+let mut writer = OpenOptions::new()
+    .write(true)
+    .open("/tmp/my_fifo")?;
+```
+
+Opening for reading blocks until a writer opens the same path, and opening for writing blocks until a reader opens it. This **synchronous rendezvous** at open time means neither side can proceed until both are ready. Plan for this in your start-up sequence — if the reader and writer both try to open in the same thread they will deadlock. Spawn a thread or use a second process.
+
+### Sending and Receiving Data
+
+Once both sides are open, use ordinary `Read` and `Write` operations:
+
+```rust
+// Writer
+writer.write_all(b"hello from writer\n")?;
+
+// Reader
+let mut line = String::new();
+reader.read_line(&mut line)?;
+println!("Received: {line}");
+```
+
+## Deleting a FIFO
+
+A FIFO is a filesystem entry like any other file and is removed with `std::fs::remove_file`:
+
+```rust
+std::fs::remove_file("/tmp/my_fifo")?;
+```
+
+Unlike local sockets, Interprocess does **not** automatically delete FIFO files when you are done with them. Your program is responsible for calling `remove_file` during cleanup.
+
+## Limitations
+
+FIFO files impose hard constraints that make them unsuitable for many IPC scenarios:
+
+- **One reader, one writer.** If multiple processes open the same FIFO for reading, they compete for data — each byte goes to only one reader, unpredictably. If multiple processes write concurrently, their data is interleaved. Unless you can guarantee exclusive access, concurrent use by more than two processes is almost always a bug.
+
+- **Unidirectional.** A FIFO carries data in one direction only. For bidirectional communication you would need two FIFOs, which doubles the complexity and the number of blocking open calls.
+
+- **Blocking open rendezvous.** Both sides must open the FIFO before either can proceed. This makes it harder to write robust startup logic compared to connection-oriented APIs like local sockets.
+
+- **No backpressure control.** The OS kernel manages the pipe buffer. When it fills up, the writer blocks. There is no way to set message boundaries, timeouts, or nonblocking accept semantics.
+
+## The `mode` Parameter
+
+The `mode` argument to `create_fifo` is a standard Unix permission bitmask, just like the one passed to `open(2)` or `mkdir(2)`. It is **masked with the process's umask** before being applied, so the actual permissions of the created file may be more restrictive than the value you pass.
+
+```rust
+// 0o777 = rwxrwxrwx before umask.
+// With a typical umask of 022 the result is 0o755 (rwxr-xr-x).
+create_fifo("/tmp/my_fifo", 0o777)?;
+```
+
+Pass `0o777` unless you have a specific reason to restrict permissions at creation time. If you need tighter access control, set the umask before calling `create_fifo`, or use `std::fs::set_permissions` after creation.
+
+<Note>
+  FIFO files are a Unix-only feature. The `create_fifo` function and the entire `os::unix` module are only available when compiling for Unix targets (`#[cfg(unix)]`). Code that calls `create_fifo` will not compile on Windows. If you need cross-platform IPC, use [local sockets](/guides/local-socket-server).
+</Note>

@@ -1,0 +1,350 @@
+---
+title: "Listener and ListenerOptions API Reference"
+sidebarTitle: "Listener"
+description: "Reference for Listener, ListenerOptions, and the traits::Listener trait in Interprocess, including accept, set_nonblocking, and name reclamation."
+---
+
+`Listener` is the server-side type for accepting incoming local socket connections. It is an enum dispatcher: on Windows it wraps a named pipe listener; on Unix it wraps a Unix-domain socket listener. You do not construct `Listener` directly — instead you configure and create it through [`ListenerOptions`](#listeneroptions), the fluent builder described below.
+
+---
+
+## `ListenerOptions`
+
+`ListenerOptions<'n>` is the server-side builder for creating a [`Listener`](#listener-enum) or a [`tokio::Listener`](/api/local-socket/tokio). All setter methods follow a builder pattern and return `Self`, so they can be chained.
+
+```rust
+use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+
+let name = "my-app.sock".to_ns_name::<GenericNamespaced>()?;
+let listener = ListenerOptions::new()
+    .name(name)
+    .create_sync()?;
+```
+
+### Constructor
+
+```rust
+pub fn new() -> ListenerOptions<'static>
+```
+
+Returns a `ListenerOptions` with default settings:
+- Name is unset (must call `.name()` before creating)
+- `reclaim_name`: `true`
+- `try_overwrite`: `false`
+- `nonblocking`: `Neither`
+
+---
+
+### Option Setters
+
+<ParamField path="name" type="Name<'n>" required>
+  Sets the name the server will listen on. This is the only required option — creating a listener without calling `.name()` results in an error.
+
+  ```rust
+  .name(name)
+  ```
+</ParamField>
+
+<ParamField path="nonblocking" type="ListenerNonblockingMode">
+  Selects the nonblocking mode for the listener. Defaults to `Neither`.
+
+  ```rust
+  .nonblocking(ListenerNonblockingMode::Accept)
+  ```
+
+  See [`ListenerNonblockingMode`](#listenernonblockingmode) for the available variants.
+</ParamField>
+
+<ParamField path="reclaim_name" type="bool">
+  Controls whether [name reclamation](#name-reclamation) runs on drop. Defaults to `true`. Set to `false` to suppress automatic socket file deletion on Unix.
+
+  ```rust
+  .reclaim_name(false)
+  ```
+</ParamField>
+
+<ParamField path="try_overwrite" type="bool">
+  When `true`, if an `AddrInUse` error is encountered during listener creation, Interprocess will attempt to delete the stale socket file and retry. Defaults to `false`.
+
+  On Unix this performs an `unlink` of the socket file if `AddrInUse` is observed, then retries the bind. On Windows, this option has no effect (named pipes cannot be overwritten).
+
+  ```rust
+  .try_overwrite(true)
+  ```
+
+  <Warning>
+    Enabling `try_overwrite` is vulnerable to a TOCTOU race: another process may replace the socket file between the `AddrInUse` observation and the `unlink`. This does not generally cause privilege escalation but can cause surprising behavior.
+  </Warning>
+</ParamField>
+
+<ParamField path="max_spin_time" type="Duration">
+  Sets the maximum cumulative time that listener creation may spend in retry loops. Relevant when `try_overwrite` is enabled and multiple processes are competing for the same socket name. Unix only; no-op on Windows.
+
+  ```rust
+  .max_spin_time(std::time::Duration::from_secs(5))
+  ```
+</ParamField>
+
+---
+
+### Creation Methods
+
+```rust
+pub fn create_sync(self) -> io::Result<Listener>
+```
+
+Creates the enum-dispatcher [`Listener`](#listener-enum), dispatching to the appropriate platform implementation based on the provided [`Name`](/api/local-socket/names).
+
+---
+
+```rust
+pub fn create_sync_as<L: traits::Listener>(self) -> io::Result<L>
+```
+
+Creates a specific implementation type `L` that implements `traits::Listener`. Use this when you need the concrete implementation (e.g., to access raw handles) rather than the dispatch enum.
+
+---
+
+```rust
+// Requires feature = "tokio"
+pub fn create_tokio(self) -> io::Result<tokio::Listener>
+```
+
+Creates the async [`tokio::Listener`](/api/local-socket/tokio). Dispatches by name type, same as `create_sync`.
+
+---
+
+```rust
+// Requires feature = "tokio"
+pub fn create_tokio_as<L: traits::tokio::Listener>(self) -> io::Result<L>
+```
+
+Creates a specific async implementation type `L`.
+
+---
+
+## `traits::Listener` Trait
+
+The `traits::Listener` trait defines the interface for all sync local socket servers. The `Listener` enum itself implements this trait, as does each underlying platform type.
+
+<Note>
+  To call methods from this trait, you must have it in scope. Use `use interprocess::local_socket::prelude::*;` or `use interprocess::local_socket::traits::Listener as _;` explicitly.
+</Note>
+
+### `accept`
+
+```rust
+fn accept(&self) -> io::Result<Self::Stream>
+```
+
+Blocks the current thread until a client connects, then returns the new [`Stream`](/api/local-socket/stream). In nonblocking mode (`Accept` or `Both`), returns `Err(WouldBlock)` immediately if no client is waiting.
+
+```rust
+let stream = listener.accept()?;
+```
+
+<Warning>
+  **Windows behavior**: `accept` must be called periodically. If a client connects and disconnects without `accept` being called between those events, the named pipe instance enters a dead-on-arrival state that blocks new connections until `accept` drains it.
+</Warning>
+
+---
+
+### `set_nonblocking`
+
+```rust
+fn set_nonblocking(&self, nonblocking: ListenerNonblockingMode) -> io::Result<()>
+```
+
+Enables or disables nonblocking mode after creation. See [`ListenerNonblockingMode`](#listenernonblockingmode) for the available modes.
+
+```rust
+listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
+```
+
+---
+
+### `do_not_reclaim_name_on_drop`
+
+```rust
+fn do_not_reclaim_name_on_drop(&mut self)
+```
+
+Disables [name reclamation](#name-reclamation) on this listener instance. Equivalent to `.reclaim_name(false)` on `ListenerOptions`, but applied after creation.
+
+```rust
+listener.do_not_reclaim_name_on_drop();
+```
+
+---
+
+### `from_options`
+
+```rust
+fn from_options(options: ListenerOptions<'_>) -> io::Result<Self>
+```
+
+Creates a listener from a fully configured `ListenerOptions`. This method is called internally by `create_sync_as` and typically should not be used directly.
+
+---
+
+## `ListenerExt` Trait
+
+`ListenerExt` is an extension trait auto-implemented for every `T: traits::Listener`. It provides one convenience method:
+
+### `incoming`
+
+```rust
+fn incoming(&self) -> Incoming<'_, Self>
+```
+
+Returns an infinite iterator that calls `accept` on each step. Use this with a `for` loop to write a server main loop:
+
+```rust
+use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions};
+use std::io::{prelude::*, BufReader};
+
+let name = "my-app.sock".to_ns_name::<GenericNamespaced>()?;
+let listener = ListenerOptions::new().name(name).create_sync()?;
+
+for conn in listener.incoming().filter_map(|c| c.ok()) {
+    let mut reader = BufReader::new(conn);
+    let mut buf = String::new();
+    reader.read_line(&mut buf)?;
+    println!("Client said: {buf}");
+}
+```
+
+The `Listener` enum also implements `Iterator<Item = io::Result<Stream>>` directly (equivalent to calling `accept` on each step), so `for conn in &listener { ... }` also works if you prefer.
+
+---
+
+## `ListenerNonblockingMode`
+
+```rust
+#[repr(u8)]
+pub enum ListenerNonblockingMode {
+    Neither,
+    Accept,
+    Stream,
+    Both,
+}
+```
+
+Controls which parts of the listener operate in nonblocking mode.
+
+| Variant | `accept()` | Resulting `Stream` |
+|---------|-----------|---------------------|
+| `Neither` | Blocking | Blocking |
+| `Accept` | Non-blocking | Blocking |
+| `Stream` | Blocking | Non-blocking |
+| `Both` | Non-blocking | Non-blocking |
+
+### Helper methods
+
+```rust
+impl ListenerNonblockingMode {
+    /// Construct from two booleans: (accept_nonblocking, stream_nonblocking)
+    pub const fn from_bool(accept: bool, stream: bool) -> Self;
+
+    /// Returns true if accept() is nonblocking
+    pub const fn accept_nonblocking(self) -> bool;
+
+    /// Returns true if produced streams are nonblocking
+    pub const fn stream_nonblocking(self) -> bool;
+}
+```
+
+---
+
+## Name Reclamation
+
+<Note>
+  Name reclamation only applies to **Unix domain socket**-based listeners. It has no effect on Windows named pipes.
+</Note>
+
+When a Unix domain socket listener closes, the socket file it created does **not** get removed automatically by the OS. The file lingers on the filesystem in a zombie state — it cannot accept connections, and a new listener cannot reuse the path unless it is deleted first (`bind` returns `AddrInUse`).
+
+Interprocess solves this with **automatic name reclamation**: when a `Listener` is dropped, it calls `std::fs::remove_file()` (i.e., `unlink()`) on the path that was passed to `create_sync()`. This allows the socket name to be reused immediately after the listener stops.
+
+### Opting out of name reclamation
+
+You can disable name reclamation in two ways:
+
+**On the builder (before creation):**
+```rust
+let listener = ListenerOptions::new()
+    .name(name)
+    .reclaim_name(false)
+    .create_sync()?;
+```
+
+**On the live listener (after creation):**
+```rust
+listener.do_not_reclaim_name_on_drop();
+```
+
+### Handling `AddrInUse` at startup
+
+If the program previously crashed without cleaning up, the stale socket file will cause `create_sync()` to return `AddrInUse`. Use `.try_overwrite(true)` to handle this automatically:
+
+```rust
+let listener = ListenerOptions::new()
+    .name(name)
+    .try_overwrite(true)
+    .create_sync()?;
+```
+
+Or handle it manually:
+
+```rust
+let listener = match ListenerOptions::new().name(name).create_sync() {
+    Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+        eprintln!("Socket file occupied — please clean up manually.");
+        return Err(e);
+    }
+    x => x?,
+};
+```
+
+<Warning>
+  If the program crashes in a way that bypasses stack unwinding (e.g., `SIGKILL` on Unix, a hard process termination), name reclamation will not occur and the socket file will remain. Using `.try_overwrite(true)` on the next startup is the recommended mitigation.
+</Warning>
+
+---
+
+## Full Server Example
+
+```rust
+use interprocess::local_socket::{
+    prelude::*,
+    GenericNamespaced,
+    ListenerOptions,
+};
+use std::io::{prelude::*, BufReader};
+
+fn main() -> std::io::Result<()> {
+    let name = "example.sock".to_ns_name::<GenericNamespaced>()?;
+
+    let listener = ListenerOptions::new()
+        .name(name)
+        .try_overwrite(true)
+        .create_sync()?;
+
+    eprintln!("Server listening on example.sock");
+
+    let mut buffer = String::with_capacity(128);
+
+    for conn in listener
+        .incoming()
+        .filter_map(|c| c.map_err(|e| eprintln!("Connection error: {e}")).ok())
+        .map(BufReader::new)
+    {
+        let mut conn = conn;
+        conn.read_line(&mut buffer)?;
+        conn.get_mut().write_all(b"Hello from server!\n")?;
+        buffer.clear();
+    }
+
+    Ok(())
+}
+```

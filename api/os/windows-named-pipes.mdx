@@ -1,0 +1,325 @@
+---
+title: "os::windows::named_pipe: Windows Named Pipe API"
+sidebarTitle: "Windows Named Pipes"
+description: "Full API reference for Interprocess Windows named pipes, covering PipeListener, PipeStream, PipeListenerOptions, PipeMode, and Tokio async variants."
+---
+
+The `os::windows::named_pipe` module exposes the full Windows named pipe API with considerably more configuration options than the high-level `local_socket` abstraction. It is the right choice when you need to control pipe mode (byte stream vs. message), instance limits, write-through behavior, security descriptors, or any other Windows-specific named pipe feature.
+
+<Note>
+This module is **Windows-only** and is conditionally compiled with `#[cfg(windows)]`. Code that imports from it will not compile on other platforms. For cross-platform IPC, prefer [`local_socket`](/api/local-socket/overview).
+</Note>
+
+---
+
+## `PipeListenerOptions`
+
+```rust
+#[non_exhaustive]
+pub struct PipeListenerOptions<'path> { /* fields below */ }
+```
+
+The builder / configuration type for creating a [`PipeListener`](#pipelistener). All fields are public and can be set directly or via the chainable setter methods.
+
+Construct a default instance with `PipeListenerOptions::new()`, configure it, then call `.create::<Rm, Sm>()` (sync) or `.create_tokio::<Rm, Sm>()` (async) to produce the listener.
+
+### Fields
+
+<ParamField path="path" type="Cow<'path, U16CStr>" required>
+  The name of the named pipe. **The `\\.\pipe\` prefix is not added automatically** — you must include it yourself, e.g. `\\.\pipe\my-app-pipe`. Use `widestring::u16cstr!` or any `ToWtf16`-compatible string.
+</ParamField>
+
+<ParamField path="mode" type="PipeMode" default="PipeMode::Bytes">
+  Specifies how data is written into the pipe stream. See [`PipeMode`](#pipemode) for the two variants. This setting applies to all data written into the pipe regardless of direction.
+</ParamField>
+
+<ParamField path="nonblocking" type="bool" default="false">
+  When `true`, `accept()` returns immediately with `WouldBlock` if no client is waiting, and stream I/O methods return `WouldBlock` instead of blocking. See the field documentation for the full behavioral description.
+</ParamField>
+
+<ParamField path="instance_limit" type="Option<NonZeroU8>" default="None">
+  Maximum number of simultaneous pipe instances (i.e. concurrent connections). `None` means no limit. The value `255` is reserved by the Windows API as the "no limit" sentinel and is not allowed here; use `None` instead.
+</ParamField>
+
+<ParamField path="write_through" type="bool" default="false">
+  Enables write-through mode for **network** connections. When enabled, writes block until all data is delivered to the remote end rather than being buffered. This flag is ignored for local connections (in release builds; debug builds will panic if set on a local pipe).
+</ParamField>
+
+<ParamField path="accept_remote" type="bool" default="false">
+  When `true`, remote machines can connect to this named pipe over the network. When `false` (the default), only local connections are accepted.
+</ParamField>
+
+<ParamField path="input_buffer_size_hint" type="u32" default="512">
+  Hint for the size of the kernel input buffer in bytes. The OS may adjust this value to satisfy alignment requirements or minimum/maximum constraints.
+</ParamField>
+
+<ParamField path="output_buffer_size_hint" type="u32" default="512">
+  Hint for the size of the kernel output buffer in bytes. The OS may adjust this value similarly to `input_buffer_size_hint`.
+</ParamField>
+
+<ParamField path="wait_timeout" type="WaitTimeout" default="WaitTimeout::DEFAULT">
+  The default timeout used by clients when calling `WaitNamedPipe`. See [`WaitTimeout`](#waittimeout) for available constants and constructors.
+</ParamField>
+
+<ParamField path="security_descriptor" type="Option<SecurityDescriptor>" default="None">
+  An optional Windows security descriptor controlling access to the pipe. `None` uses the default security attributes of the calling process.
+</ParamField>
+
+<ParamField path="inheritable" type="bool" default="false">
+  Whether the server handle is inheritable by child processes. There is little reason to set this to `true`.
+</ParamField>
+
+### Key Methods
+
+```rust
+impl<'path> PipeListenerOptions<'path> {
+    pub fn new() -> Self;
+    pub fn path(self, path: impl ToWtf16<'path>) -> Self;
+    pub fn mode(self, mode: PipeMode) -> Self;
+    pub fn nonblocking(self, nonblocking: bool) -> Self;
+    pub fn instance_limit(self, instance_limit: Option<NonZeroU8>) -> Self;
+    pub fn write_through(self, write_through: bool) -> Self;
+    pub fn accept_remote(self, accept_remote: bool) -> Self;
+    pub fn input_buffer_size_hint(self, input_buffer_size_hint: u32) -> Self;
+    pub fn output_buffer_size_hint(self, output_buffer_size_hint: u32) -> Self;
+    pub fn wait_timeout(self, wait_timeout: WaitTimeout) -> Self;
+    pub fn security_descriptor(self, security_descriptor: Option<SecurityDescriptor>) -> Self;
+    pub fn inheritable(self, inheritable: bool) -> Self;
+    pub fn to_owned(&self) -> io::Result<PipeListenerOptions<'static>>;
+}
+
+// Sync creation
+impl PipeListenerOptions<'_> {
+    pub fn create<Rm: PipeModeTag, Sm: PipeModeTag>(
+        &self,
+    ) -> io::Result<PipeListener<Rm, Sm>>;
+    pub fn create_duplex<M: PipeModeTag>(&self) -> io::Result<PipeListener<M, M>>;
+    pub fn create_recv_only<Rm: PipeModeTag>(
+        &self,
+    ) -> io::Result<PipeListener<Rm, pipe_mode::None>>;
+    pub fn create_send_only<Sm: PipeModeTag>(
+        &self,
+    ) -> io::Result<PipeListener<pipe_mode::None, Sm>>;
+}
+
+// Tokio creation (requires feature = "tokio")
+impl PipeListenerOptions<'_> {
+    pub fn create_tokio<Rm: PipeModeTag, Sm: PipeModeTag>(
+        &self,
+    ) -> io::Result<tokio::PipeListener<Rm, Sm>>;
+    pub fn create_tokio_duplex<M: PipeModeTag>(
+        &self,
+    ) -> io::Result<tokio::PipeListener<M, M>>;
+    pub fn create_tokio_recv_only<Rm: PipeModeTag>(
+        &self,
+    ) -> io::Result<tokio::PipeListener<Rm, pipe_mode::None>>;
+    pub fn create_tokio_send_only<Sm: PipeModeTag>(
+        &self,
+    ) -> io::Result<tokio::PipeListener<pipe_mode::None, Sm>>;
+}
+```
+
+---
+
+## `PipeMode`
+
+```rust
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PipeMode {
+    Bytes,
+    Messages,
+}
+```
+
+Controls how data is structured in the pipe.
+
+| Variant | Windows constant | Description |
+|---|---|---|
+| `Bytes` | `PIPE_TYPE_BYTE` | The pipe is a **byte stream** — message boundaries are erased and the pipe behaves like a TCP stream. |
+| `Messages` | `PIPE_TYPE_MESSAGE` | The pipe preserves **message boundaries** — each write produces a discrete message that can be read atomically on the receiving end. |
+
+Use `PipeMode::Bytes` for simple stream protocols. Use `PipeMode::Messages` when message framing is important and you want the OS to handle boundaries for you.
+
+---
+
+## `WaitTimeout`
+
+```rust
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WaitTimeout(u32); // milliseconds
+```
+
+A named pipe wait timeout, corresponding to the timeout parameter of [`WaitNamedPipe`](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-waitnamedpipew). Used in `PipeListenerOptions::wait_timeout` to specify the default timeout for connecting clients.
+
+### Constants
+
+| Constant | Raw value | Description |
+|---|---|---|
+| `WaitTimeout::DEFAULT` | `0x00000000` | Use the server's default timeout; if the server also uses this, Windows defaults to **50 ms**. |
+| `WaitTimeout::MIN` | `1` | The shortest possible finite timeout (1 ms). |
+| `WaitTimeout::MAX` | `0xFFFFFFFE` | The largest possible finite timeout. |
+| `WaitTimeout::FOREVER` | `0xFFFFFFFF` | Wait indefinitely. |
+
+### Constructors
+
+```rust
+impl WaitTimeout {
+    pub const fn from_raw(raw: u32) -> Self;
+    pub const fn from_millis_clamped(millis: u32) -> Self;
+    pub const fn from_duration_clamped(duration: Duration) -> Self;
+    pub const fn to_raw(self) -> u32;
+}
+```
+
+`from_millis_clamped` and `from_duration_clamped` silently clamp values that would coincide with `DEFAULT` (0) or `FOREVER` (0xFFFFFFFF) to `MIN` and `MAX` respectively.
+
+---
+
+## `PipeListener`
+
+```rust
+pub struct PipeListener<Rm: PipeModeTag, Sm: PipeModeTag> { /* ... */ }
+```
+
+The server for a Windows named pipe. It accepts client connections and produces [`PipeStream`](#pipestream) instances for communicating with each client. The `Rm` type parameter controls how data is **received** (read mode) and `Sm` controls how data is **sent**.
+
+The only way to create a `PipeListener` is through [`PipeListenerOptions`](#pipelisteneroptions).
+
+### Methods
+
+```rust
+impl<Rm: PipeModeTag, Sm: PipeModeTag> PipeListener<Rm, Sm> {
+    /// Blocks until a client connects and returns a PipeStream for it.
+    /// Call this in a loop to serve multiple clients.
+    pub fn accept(&self) -> io::Result<PipeStream<Rm, Sm>>;
+
+    /// Returns an iterator that calls accept() on each next().
+    pub fn incoming(&self) -> Incoming<'_, Rm, Sm>;
+
+    /// Dynamically enables or disables nonblocking mode for all existing
+    /// and future instances.
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()>;
+
+    /// Constructs a listener directly from a pre-created handle and options table.
+    pub fn from_handle_and_options(
+        handle: OwnedHandle,
+        options: PipeListenerOptions<'static>,
+    ) -> Self;
+}
+```
+
+<Note>
+If a client connects and immediately disconnects before `accept()` is called, the dead connection is cleared automatically on the next `accept()` call. However, neglecting to call `accept()` periodically may prevent new clients from connecting.
+</Note>
+
+### Type Aliases
+
+```rust
+// Duplex: same mode for both Rm and Sm
+pub type DuplexPipeStream<M>  = PipeStream<M, M>;
+// Receive-only
+pub type RecvPipeStream<M>    = PipeStream<M, pipe_mode::None>;
+// Send-only
+pub type SendPipeStream<M>    = PipeStream<pipe_mode::None, M>;
+```
+
+---
+
+## `PipeStream`
+
+```rust
+pub struct PipeStream<Rm: PipeModeTag, Sm: PipeModeTag> { /* ... */ }
+```
+
+A named pipe stream, created either by a server-side `PipeListener::accept()` or by connecting as a client. Combines all combinations of receive and send modes via the `Rm` and `Sm` generic parameters.
+
+### I/O Traits
+
+| Condition | Traits implemented |
+|---|---|
+| `Rm` is `pipe_mode::Bytes` | `std::io::Read` |
+| `Sm` is `pipe_mode::Bytes` | `std::io::Write` |
+| `Rm` is `pipe_mode::Messages` | `RecvMsg` (message-oriented receive) |
+| `Sm` is `pipe_mode::Messages` | `SendMsg` (message-oriented send) |
+
+### Splitting
+
+Streams can be split for concurrent sends and receives:
+
+- **By reference** — borrow the stream; both `PipeStream` and `&PipeStream` implement I/O traits.
+- **By value** — use `.split()` to get independent `RecvPipeStream` and `SendPipeStream` halves. Use `.reunite()` to recombine them.
+
+### Flushing and Limbo
+
+Upon being dropped, a stream that has pending unflushed data is transparently moved to an internal thread pool ("limbo"). This pool flushes and closes the handle in the background, ensuring the peer receives all data before receiving EOF. Streams that have already been explicitly flushed (and haven't sent since) skip limbo entirely.
+
+---
+
+## Tokio Async Variants
+
+Requires `features = ["tokio"]` in `Cargo.toml`.
+
+### `named_pipe::tokio::PipeListener`
+
+```rust
+// In interprocess::os::windows::named_pipe::tokio
+pub struct PipeListener<Rm: PipeModeTag, Sm: PipeModeTag> { /* ... */ }
+```
+
+Async counterpart to the sync `PipeListener`. Created via `PipeListenerOptions::create_tokio()`.
+
+```rust
+impl<Rm: PipeModeTag, Sm: PipeModeTag> PipeListener<Rm, Sm> {
+    /// Asynchronously waits until a client connects.
+    pub async fn accept(&self) -> io::Result<PipeStream<Rm, Sm>>;
+
+    /// Constructs from a Tokio NamedPipeServer and options.
+    pub fn from_tokio_and_options(
+        tokio_object: TokioNPServer,
+        options: PipeListenerOptions<'static>,
+    ) -> Self;
+
+    /// Constructs from a raw OwnedHandle and options.
+    /// Returns an error if called outside a Tokio runtime.
+    pub fn from_handle_and_options(
+        handle: OwnedHandle,
+        options: PipeListenerOptions<'static>,
+    ) -> io::Result<Self>;
+}
+```
+
+### `named_pipe::tokio::PipeStream`
+
+```rust
+pub struct PipeStream<Rm: PipeModeTag, Sm: PipeModeTag> { /* ... */ }
+```
+
+Async counterpart to the sync `PipeStream`. Implements `tokio::io::AsyncRead` and `tokio::io::AsyncWrite` depending on the `Rm`/`Sm` parameters. Supports by-reference and by-value splitting identically to its sync counterpart.
+
+---
+
+## Quick-Start Example
+
+```rust
+use interprocess::os::windows::named_pipe::{
+    PipeListenerOptions, PipeMode, pipe_mode,
+};
+use widestring::u16cstr;
+
+// Server
+let listener = PipeListenerOptions::new()
+    .path(u16cstr!(r"\\.\pipe\my-app"))
+    .mode(PipeMode::Bytes)
+    .create_duplex::<pipe_mode::Bytes>()?;
+
+// Accept one client
+let mut stream = listener.accept()?;
+use std::io::{Read, Write};
+stream.write_all(b"Hello, client!")?;
+```
+
+<Tip>
+For cross-platform IPC code that needs to run on both Windows and Unix, use the [`local_socket`](/api/local-socket/overview) abstraction instead. It uses Windows named pipes under the hood on Windows, but provides a consistent API across operating systems.
+</Tip>

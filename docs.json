@@ -1,72 +1,103 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "Interprocess",
+  "theme": "luma",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#1eaedb",
+    "light": "#ffffff",
+    "dark": "#7c7c7c"
   },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
+  "favicon": "https://media.brand.dev/cd634a0d-5245-4028-b5a3-503eb60d47fe.svg",
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:support@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/kotauskas/interprocess"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/kotauskas/interprocess"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/local-sockets",
+              "concepts/unnamed-pipes",
+              "concepts/async-tokio",
+              "concepts/platform-support"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/local-socket-server",
+              "guides/local-socket-client",
+              "guides/tokio-async",
+              "guides/windows-named-pipes",
+              "guides/unix-fifo-files"
+            ]
+          },
+          {
+            "group": "Platform & Configuration",
+            "pages": [
+              "platform/feature-flags",
+              "platform/name-types",
+              "platform/security"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Local Sockets",
+            "pages": [
+              "api/local-socket/overview",
+              "api/local-socket/listener",
+              "api/local-socket/stream",
+              "api/local-socket/names",
+              "api/local-socket/peer-creds",
+              "api/local-socket/tokio"
+            ]
+          },
+          {
+            "group": "Unnamed Pipes",
+            "pages": [
+              "api/unnamed-pipe/overview",
+              "api/unnamed-pipe/tokio"
+            ]
+          },
+          {
+            "group": "OS-Specific",
+            "pages": [
+              "api/os/windows-named-pipes",
+              "api/os/unix-fifo-files"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/utilities/error-types",
+              "api/utilities/try-clone"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

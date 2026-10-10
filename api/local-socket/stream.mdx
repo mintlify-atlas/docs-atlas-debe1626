@@ -1,0 +1,351 @@
+---
+title: "Stream, ConnectOptions, and RecvHalf/SendHalf API"
+sidebarTitle: "Stream"
+description: "Reference for the Stream type and traits in Interprocess local_socket, including connect, split, timeouts, nonblocking mode, and the ConnectOptions builder."
+---
+
+`Stream` is the bidirectional byte-stream connection type used by both local socket clients (connecting to a server) and by server-accepted connections returned from `Listener::accept`. Like `Listener`, `Stream` is an enum dispatcher: on Windows it wraps a named pipe stream; on Unix it wraps a Unix-domain socket. Clients are created via [`ConnectOptions`](#connectoptions) or the `Stream::connect` shorthand. Server-side connections are obtained from [`Listener::accept`](/api/local-socket/listener#accept).
+
+---
+
+## `ConnectOptions`
+
+`ConnectOptions<'n>` is the client-side builder for creating a `Stream` or a `tokio::Stream`. All setter methods return `Self` for chaining.
+
+```rust
+use interprocess::local_socket::{prelude::*, GenericNamespaced, ConnectOptions};
+
+let name = "my-app.sock".to_ns_name::<GenericNamespaced>()?;
+let stream = ConnectOptions::new()
+    .name(name)
+    .connect_sync()?;
+```
+
+### Constructor
+
+```rust
+pub fn new() -> ConnectOptions<'static>
+```
+
+Returns a `ConnectOptions` with default settings:
+- Name is unset (must call `.name()` before connecting)
+- `nonblocking_stream`: `false`
+- `wait_mode`: `ConnectWaitMode::Unbounded`
+
+---
+
+### Option Setters
+
+<ParamField path="name" type="Name<'n>" required>
+  Sets the socket name to connect to.
+
+  ```rust
+  .name(name)
+  ```
+</ParamField>
+
+<ParamField path="nonblocking_stream" type="bool">
+  When `true`, the resulting stream will have nonblocking mode enabled from the start (reads and writes return `WouldBlock` instead of blocking). Defaults to `false`.
+
+  On Unix, enabling this and `wait_mode = Unbounded` together avoids one extra `fcntl` call during connection.
+
+  ```rust
+  .nonblocking_stream(true)
+  ```
+</ParamField>
+
+<ParamField path="wait_mode" type="ConnectWaitMode">
+  Controls how long the connect operation is allowed to wait. Defaults to `ConnectWaitMode::Unbounded`.
+
+  | Variant | Behavior |
+  |---------|----------|
+  | `Unbounded` | Wait indefinitely until the connection is established |
+  | `Timeout(Duration)` | Wait for up to the specified duration, then return `TimedOut` |
+  | `Deferred` | Return immediately; errors surface on the first I/O operation |
+
+  <Warning>
+    `ConnectWaitMode::Deferred` is not supported on Windows and will return an error.
+    On Windows, `Timeout` has limited effect: connecting to an overloaded named pipe returns an error as soon as possible regardless of the timeout.
+  </Warning>
+
+  ```rust
+  use interprocess::ConnectWaitMode;
+  use std::time::Duration;
+
+  .wait_mode(ConnectWaitMode::Timeout(Duration::from_secs(3)))
+  ```
+</ParamField>
+
+---
+
+### Creation Methods
+
+```rust
+pub fn connect_sync(&self) -> io::Result<Stream>
+```
+
+Creates the enum-dispatcher `Stream` by connecting to the named socket.
+
+---
+
+```rust
+pub fn connect_sync_as<S: traits::Stream>(&self) -> io::Result<S>
+```
+
+Creates a specific sync stream implementation type `S`.
+
+---
+
+```rust
+// Requires feature = "tokio"
+pub fn connect_tokio(&self) -> impl Future<Output = io::Result<tokio::Stream>> + Send + Sync + '_
+```
+
+Asynchronously connects and returns a `tokio::Stream`.
+
+---
+
+```rust
+// Requires feature = "tokio"
+pub fn connect_tokio_as<S: traits::tokio::Stream>(
+    &self,
+) -> impl Future<Output = io::Result<S>> + Send + Sync + '_
+```
+
+Asynchronously connects and returns a specific Tokio stream implementation type `S`.
+
+---
+
+## `traits::Stream` Trait
+
+The `traits::Stream` trait defines the core interface for all sync local socket streams. It extends `std::io::Read` and `std::io::Write` (both by value and by `&` reference).
+
+<Note>
+  Bring this trait into scope with `use interprocess::local_socket::prelude::*;` or `use interprocess::local_socket::traits::Stream as _;`.
+</Note>
+
+### `connect`
+
+```rust
+fn connect(name: Name<'_>) -> io::Result<Self>
+```
+
+Shorthand for `ConnectOptions::new().name(name).connect_sync_as::<Self>()`. Connects synchronously with default options.
+
+```rust
+use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream as LocalSocketStream};
+
+let name = "my-app.sock".to_ns_name::<GenericNamespaced>()?;
+let stream = LocalSocketStream::connect(name)?;
+```
+
+---
+
+### `set_nonblocking`
+
+```rust
+fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()>
+```
+
+Enables or disables nonblocking mode at runtime. In nonblocking mode, reads and writes return `Err(WouldBlock)` immediately when they would otherwise block.
+
+```rust
+stream.set_nonblocking(true)?;
+```
+
+---
+
+### `set_recv_timeout`
+
+```rust
+fn set_recv_timeout(&self, timeout: Option<Duration>) -> io::Result<()>
+```
+
+Sets a timeout for receive (read) operations. Pass `None` to disable the timeout (reads block indefinitely). When the timeout expires, a `TimedOut` error is returned.
+
+```rust
+stream.set_recv_timeout(Some(Duration::from_secs(5)))?;
+stream.set_recv_timeout(None)?; // disable
+```
+
+---
+
+### `set_send_timeout`
+
+```rust
+fn set_send_timeout(&self, timeout: Option<Duration>) -> io::Result<()>
+```
+
+Sets a timeout for send (write) operations. Pass `None` to disable. When the timeout expires, a `TimedOut` error is returned.
+
+```rust
+stream.set_send_timeout(Some(Duration::from_millis(500)))?;
+```
+
+---
+
+### `split`
+
+```rust
+fn split(self) -> (Self::RecvHalf, Self::SendHalf)
+```
+
+Consumes the stream and splits it into a receive half and a send half. This is useful when you need to pass each half to a different thread.
+
+```rust
+let (recv_half, send_half) = stream.split();
+```
+
+<Tip>
+  Before reaching for `split`, consider wrapping the stream in an `Arc` instead. Because `&Stream` implements both `Read` and `Write`, you can borrow the stream from multiple owners simultaneously:
+
+  ```rust
+  use std::sync::Arc;
+
+  let stream = Arc::new(stream);
+  let stream2 = Arc::clone(&stream);
+
+  std::thread::spawn(move || {
+      (&*stream2).write_all(b"hello")?;
+      io::Result::Ok(())
+  });
+  ```
+
+  Note that dropping a `RecvHalf` or `SendHalf` does **not** shut down the underlying connection — unlike with `TcpStream`. This may be counterintuitive.
+</Tip>
+
+---
+
+### `reunite`
+
+```rust
+fn reunite(rh: Self::RecvHalf, sh: Self::SendHalf) -> ReuniteResult<Self>
+```
+
+Attempts to recombine a `RecvHalf` and a `SendHalf` back into the original stream. Returns an error containing both halves if they came from different streams or were never split from a stream to begin with.
+
+```rust
+let (rh, sh) = stream.split();
+// ... pass to threads ...
+let stream = Stream::reunite(rh, sh)?;
+```
+
+---
+
+### Read and Write
+
+`Stream` implements `std::io::Read` and `std::io::Write` both by mutable reference and by value, so you can use it directly with any standard I/O machinery:
+
+```rust
+use std::io::{prelude::*, BufReader};
+
+let mut writer = &stream; // &Stream: Write
+let reader = BufReader::new(&stream); // &Stream: Read
+
+writer.write_all(b"hello")?;
+```
+
+Flushing a `Stream` is always a successful no-op (the stream is not buffered at the Interprocess layer).
+
+---
+
+## `traits::StreamCommon` Trait
+
+`StreamCommon` is implemented by both sync `Stream` and its async Tokio counterpart. It provides operations that are instantaneous in nature.
+
+### `take_error`
+
+```rust
+fn take_error(&self) -> io::Result<Option<io::Error>>
+```
+
+Reads and clears the stored socket error, returning `None` if no error has occurred since the last call. Subsequent calls return `None` until another error is stored by the OS.
+
+```rust
+if let Some(err) = stream.take_error()? {
+    eprintln!("Socket error: {err}");
+}
+```
+
+---
+
+### `peer_creds`
+
+```rust
+fn peer_creds(&self) -> io::Result<PeerCreds>
+```
+
+Returns the OS-level credentials of the remote peer. See [`PeerCreds`](/api/local-socket/peer-creds) for full documentation on available fields and platform behavior.
+
+```rust
+let creds = stream.peer_creds()?;
+if let Some(pid) = creds.pid() {
+    println!("Connected to PID {}", pid);
+}
+```
+
+---
+
+## `RecvHalf` and `SendHalf`
+
+`RecvHalf` and `SendHalf` are enum dispatchers for the receive and send halves of a split `Stream`, respectively.
+
+### `traits::RecvHalf`
+
+```rust
+pub trait RecvHalf: Read + Send + Sync {
+    type Stream: Stream;
+
+    fn set_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+}
+```
+
+`RecvHalf` implements `std::io::Read` (by value and by `&` reference). Use `set_timeout` to limit how long a read blocks.
+
+### `traits::SendHalf`
+
+```rust
+pub trait SendHalf: Write + Send + Sync {
+    type Stream: Stream;
+
+    fn set_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+}
+```
+
+`SendHalf` implements `std::io::Write` (by value and by `&` reference). Use `set_timeout` to limit how long a write blocks.
+
+---
+
+## Full Client Example
+
+```rust
+use interprocess::local_socket::{
+    prelude::*,
+    GenericFilePath,
+    GenericNamespaced,
+    Stream as LocalSocketStream,
+};
+use std::io::{prelude::*, BufReader};
+
+fn main() -> std::io::Result<()> {
+    // Prefer namespaced names on platforms that support them
+    let name = if GenericNamespaced::is_supported() {
+        "example.sock".to_ns_name::<GenericNamespaced>()?
+    } else {
+        "/tmp/example.sock".to_fs_name::<GenericFilePath>()?
+    };
+
+    let conn = LocalSocketStream::connect(name)?;
+    let mut reader = BufReader::new(&conn);
+    let mut sender = &conn;
+
+    sender.write_all(b"Hello from client!\n")?;
+
+    let mut buf = String::new();
+    reader.read_line(&mut buf)?;
+
+    drop(conn);
+    println!("Server said: {buf}");
+    Ok(())
+}
+```

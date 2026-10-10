@@ -1,0 +1,113 @@
+---
+title: "Local Sockets: The Flagship IPC Primitive"
+sidebarTitle: "Local Sockets"
+description: "Understand how Interprocess local sockets work, how they dispatch to platform-specific backends, and why they outperform localhost TCP connections."
+---
+
+Local sockets are the recommended IPC primitive in Interprocess and the best starting point for any two processes that need to talk to each other on the same machine. They provide a socket-like interface — a server listens for incoming connections, each client gets a private bidirectional stream — while offering significantly better performance than `localhost` TCP sockets, along with developer-friendly identifiers and built-in peer authentication.
+
+## What Are Local Sockets?
+
+Local sockets are **not** a real OS primitive. They are a cross-platform abstraction built by Interprocess that dispatches to the most appropriate underlying IPC mechanism for each platform:
+
+- **Unix** (Linux, macOS, FreeBSD, and other Unix-like systems): backed by Unix domain sockets (`std::os::unix::net`), leveraging the standard library's own types.
+- **Windows**: backed by named pipes (`os::windows::named_pipe`), the conventional Windows counterpart to Unix domain sockets.
+
+The public-facing types — `Listener`, `Stream`, `RecvHalf`, and `SendHalf` — are enums in the style of [`enum_dispatch`](https://crates.io/crates/enum_dispatch) whose variants correspond to the available underlying implementations. Each variant is talked to through a corresponding trait in the `traits` module: `traits::Listener`, `traits::Stream`, `traits::RecvHalf`, and `traits::SendHalf`.
+
+## Zero-Cost Dispatch
+
+Because there is exactly one underlying local socket implementation per platform today, the enum dispatch is **currently zero-cost on all platforms**. Windows uses only named-pipe-backed local sockets; Unix uses only Unix-domain-socket-backed local sockets. There is no runtime branching involved.
+
+This could change if Windows adds mainstream support for its Unix domain socket implementation. Even if a second variant were introduced, the overhead of the dispatch would be negligible compared to the overhead of the actual system calls that perform I/O.
+
+## Stability Guarantee
+
+Interprocess provides a strong stability guarantee: **the mapping from a local socket name to its underlying IPC primitive depends only on the current platform and the name type used.** Mappings are documented and will not meaningfully change within a major version.
+
+This makes local sockets suitable for **interoperating with programs that do not use Interprocess** — including programs not written in Rust at all. Interprocess never inserts its own message framing or metadata into the stream. The bytes you write are the exact bytes that come out the other end. All you need for reliable communication is to agree on the appropriate name type for the platforms you care about.
+
+## Name Types
+
+A local socket name is constructed using one of two generic name type tags:
+
+- **`GenericFilePath`** — maps a filesystem path to a local socket name. On Windows, paths must start with `\\.\pipe\`. On Unix, the path is used directly as the Unix domain socket path.
+- **`GenericNamespaced`** — maps an arbitrary string to a local socket name. On Windows, prepends `\\.\pipe\`. On Linux, resolves into the abstract namespace. On other Unix systems, prepends `/tmp/`.
+
+Both types implement `NameType` and are always supported (`is_supported()` returns `true` on all platforms). The conversion is done through the `ToFsName` and `ToNsName` traits:
+
+```rust
+use interprocess::local_socket::{prelude::*, GenericNamespaced, GenericFilePath};
+
+// Namespaced name — works on all platforms
+let name = "example.sock".to_ns_name::<GenericNamespaced>()?;
+
+// Filesystem-path name — also works on all platforms
+let name = "/tmp/example.sock".to_fs_name::<GenericFilePath>()?;
+```
+
+For full details on name types, platform-specific behavior, and choosing between them, see [Name Types](/platform/name-types).
+
+## Peer Credentials
+
+Every connected `Stream` exposes a `peer_creds()` method (from the `StreamCommon` trait) that returns a `PeerCreds` struct describing the other side of the connection:
+
+- **All platforms**: `pid()` — the process ID of the peer (subject to race conditions if the peer's handle is leaked).
+- **Unix** (`ucred`-based platforms: Linux, Android, OpenBSD, Fuchsia, Redox): `euid()` and `egid()` — effective user and group IDs.
+- **Unix** (`xucred`-based platforms: FreeBSD, DragonFly BSD, macOS, iOS, tvOS, watchOS): `euid()` and `groups()` — effective user ID and supplementary groups.
+- **NetBSD**: `euid()` and `egid()`.
+
+```rust
+use interprocess::local_socket::prelude::*;
+
+let creds = stream.peer_creds()?;
+if let Some(pid) = creds.pid() {
+    println!("Connected to process {pid}");
+}
+```
+
+For the full `PeerCreds` API and per-platform availability of each credential, see [Peer Credentials](/api/local-socket/peer-creds).
+
+## The `prelude` Module
+
+Interprocess local sockets involve several traits that must be in scope for the various methods to be callable. Rather than importing them individually, the recommended approach is a single wildcard import from the `prelude` module:
+
+```rust
+use interprocess::local_socket::prelude::*;
+```
+
+This brings in `NameType`, `ToFsName`, `ToNsName`, `Listener`, `ListenerExt`, `Stream`, and `StreamCommon` — all as `_`-aliased trait imports so they don't pollute your namespace — as well as `LocalSocketListener` and `LocalSocketStream` as type aliases for the enum types.
+
+## Raw Handle and File Descriptor Access
+
+<Note>
+  The `Listener`, `Stream`, `RecvHalf`, and `SendHalf` enum types deliberately **do not** implement
+  `{As,Into,From}Raw{Handle,Fd}`, `As{Handle,Fd}`, or `From<Owned{Handle,Fd}>`. To access those
+  trait implementations on the underlying platform type, you must match on the enum variant
+  explicitly.
+
+  ```rust
+  # #[cfg(unix)]
+  use {interprocess::local_socket::prelude::*, std::os::unix::prelude::*};
+  # #[cfg(unix)] fn hi(fd: OwnedFd, fd2: OwnedFd) {
+
+  // Creating a stream from a raw file descriptor
+  let stream = LocalSocketStream::UdSocket(fd.into());
+
+  // Consuming a stream to recover its file descriptor
+  let fd = match stream {
+      LocalSocketStream::UdSocket(s) => OwnedFd::from(s),
+  };
+
+  # let stream = LocalSocketStream::UdSocket(fd2.into());
+  // Borrowing a stream's file descriptor without taking ownership
+  let stream_impl = match &stream {
+      LocalSocketStream::UdSocket(s) => s,
+  };
+  let fd = stream_impl.as_fd();
+
+  // Listener, RecvHalf, and SendHalf work analogously.
+  // On Windows, replace Fd with Handle.
+  # }
+  ```
+</Note>
