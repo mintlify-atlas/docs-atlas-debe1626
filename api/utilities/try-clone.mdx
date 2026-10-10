@@ -1,7 +1,7 @@
 ---
-title: "TryClone: Fallible OS Handle Duplication"
+title: "TryClone Trait: Fallible OS Handle and FD Duplication"
 sidebarTitle: "TryClone"
-description: "Reference for the TryClone trait in Interprocess, which enables fallible OS handle and file descriptor duplication via DuplicateHandle or dup system calls."
+description: "Reference for the TryClone trait in Interprocess: fallible OS handle and file descriptor duplication via DuplicateHandle on Windows and dup on Unix."
 ---
 
 `TryClone` is the Interprocess trait for fallible OS object duplication. The standard library's `Clone` trait is infallible — it cannot return an error — but OS handle and file descriptor duplication routinely involves system calls that may fail. `TryClone` fills this gap, offering a `try_clone(&self) -> io::Result<Self>` method on all Interprocess types that wrap OS objects.

@@ -1,7 +1,7 @@
 ---
-title: "Error Types in Interprocess: ConversionError and ReuniteError"
+title: "Interprocess Error Types: ConversionError, ReuniteError"
 sidebarTitle: "Error Types"
-description: "Reference for Interprocess error types: ConversionError for failed handle/FD conversions with ownership return, ReuniteError for split stream reunification failures."
+description: "Reference for Interprocess error types: ConversionError returns ownership on failed handle conversions; ReuniteError handles mismatched stream halves."
 ---
 
 Interprocess defines specialized error types that preserve object ownership on failure. Rather than simply discarding the object that was being converted when an error occurs, these types return ownership of the input back to the caller wherever possible — allowing the caller to recover, retry, or use the object in another way.
@@ -53,7 +53,7 @@ impl<S, E> ConversionError<S, E> {
     /// Returns ownership; no OS cause; explicit details.
     pub fn from_source_and_details(source: S, details: E) -> Self;
 
-    /// No ownership return; no OS cause; explicit details.
+    /// No ownership return; has an OS cause; explicit details.
     pub fn from_cause_and_details(cause: io::Error, details: E) -> Self;
 }
 ```

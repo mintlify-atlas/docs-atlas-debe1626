@@ -1,5 +1,5 @@
 ---
-title: "Async Local Sockets with Tokio and Interprocess"
+title: "Async Local Sockets with Tokio and Interprocess in Rust"
 sidebarTitle: "Tokio Async"
 description: "Build a concurrent async local socket server and client using the Tokio feature in Interprocess, handling multiple connections without spawning OS threads."
 ---
@@ -107,39 +107,39 @@ tokio = { version = "1", features = ["full"] }
 ## Full Async Server Example
 
 ```rust
-use {
-    interprocess::local_socket::{
-        tokio::{prelude::*, Stream},
-        GenericNamespaced, ListenerOptions,
-    },
-    std::io,
-    tokio::{
-        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-        try_join,
-    },
-};
-
-async fn handle_conn(conn: Stream) -> io::Result<()> {
-    let mut recver = BufReader::new(&conn);
-    let mut sender = &conn;
-
-    let mut buffer = String::with_capacity(128);
-
-    let send = sender.write_all(b"Hello from server!\n");
-    let recv = recver.read_line(&mut buffer);
-
-    try_join!(recv, send)?;
-
-    // Avoid holding up resources.
-    drop(conn);
-
-    // read_line keeps the line feed at the end.
-    print!("Client answered: {buffer}");
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use {
+        interprocess::local_socket::{
+            tokio::{prelude::*, Stream},
+            GenericNamespaced, ListenerOptions,
+        },
+        std::io,
+        tokio::{
+            io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+            try_join,
+        },
+    };
+
+    async fn handle_conn(conn: Stream) -> io::Result<()> {
+        let mut recver = BufReader::new(&conn);
+        let mut sender = &conn;
+
+        let mut buffer = String::with_capacity(128);
+
+        let send = sender.write_all(b"Hello from server!\n");
+        let recv = recver.read_line(&mut buffer);
+
+        try_join!(recv, send)?;
+
+        // Avoid holding up resources.
+        drop(conn);
+
+        // read_line keeps the line feed at the end.
+        print!("Client answered: {buffer}");
+        Ok(())
+    }
+
     let printname = "example.sock";
     let name = printname.to_ns_name::<GenericNamespaced>()?;
 

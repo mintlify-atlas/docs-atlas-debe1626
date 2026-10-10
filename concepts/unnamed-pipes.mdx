@@ -1,7 +1,7 @@
 ---
-title: "Unnamed Pipes for Parent-Child Communication"
+title: "Unnamed Pipes for Parent–Child IPC in Interprocess"
 sidebarTitle: "Unnamed Pipes"
-description: "Learn how Interprocess unnamed pipes extend std::process pipes, with inheritable handles for passing endpoints to child processes via arguments or env vars."
+description: "Learn how Interprocess unnamed pipes extend std::process pipes with inheritable handles for passing endpoints to child processes via arguments or env vars."
 ---
 
 Unnamed pipes are the classic Unix IPC primitive — a unidirectional, kernel-buffered byte channel with a sending end and a receiving end. Interprocess exposes them via the `unnamed_pipe` module for cases where the standard library's built-in pipe support (`std::process::Stdio`) is not flexible enough. Because the handles and file descriptors are inheritable by default, unnamed pipes are most useful for setting up communication channels between a parent process and a child process it spawns.

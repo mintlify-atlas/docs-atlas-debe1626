@@ -1,7 +1,7 @@
 ---
-title: "Name Types: GenericFilePath and GenericNamespaced"
+title: "Name Types: GenericFilePath and GenericNamespaced API"
 sidebarTitle: "Names"
-description: "API reference for Interprocess name types, the Name type, ToFsName and ToNsName conversion traits, and how names map to underlying IPC primitives per platform."
+description: "API reference for Interprocess name types: Name, ToFsName and ToNsName conversion traits, and how names map to underlying IPC primitives per platform."
 ---
 
 Names identify local socket endpoints and determine which underlying OS primitive Interprocess will use. The name type you choose is significant: it controls whether a filesystem path (Unix-domain socket file, or a named pipe path on Windows) or a dedicated namespace (abstract namespace on Linux, `\\.\pipe\` on Windows, `/tmp/`-prefixed path on other Unix) is used to address the socket.

@@ -1,5 +1,5 @@
 ---
-title: "Listener and ListenerOptions API Reference"
+title: "Listener and ListenerOptions — Local Socket Server API"
 sidebarTitle: "Listener"
 description: "Reference for Listener, ListenerOptions, and the traits::Listener trait in Interprocess, including accept, set_nonblocking, and name reclamation."
 ---
@@ -214,7 +214,7 @@ for conn in listener.incoming().filter_map(|c| c.ok()) {
 }
 ```
 
-The `Listener` enum also implements `Iterator<Item = io::Result<Stream>>` directly (equivalent to calling `accept` on each step), so `for conn in &listener { ... }` also works if you prefer.
+The `Listener` enum also implements `Iterator<Item = io::Result<Stream>>` directly (equivalent to calling `accept` on each step), so `for conn in listener { ... }` also works if you prefer — but note this consumes the listener, whereas `incoming()` only borrows it.
 
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: "FIFO Files on Unix with Interprocess"
+title: "Unix FIFO Files and Named Pipes with Interprocess in Rust"
 sidebarTitle: "FIFO Files"
 description: "Create and use FIFO files (Unix named pipes) with Interprocess's create_fifo() function for communicating with programs that expect FIFO-based IPC."
 ---
@@ -24,7 +24,7 @@ create_fifo("/tmp/my_fifo", 0o777)?;
 The function signature is:
 
 ```rust
-pub fn create_fifo<P: AsRef<Path>>(path: P, mode: mode_t) -> io::Result<()>
+pub fn create_fifo<P: AsRef<Path>>(path: P, mode: libc::mode_t) -> io::Result<()>
 ```
 
 - **`path`** — The filesystem path where the FIFO entry will be created. The parent directory must exist and be writable.

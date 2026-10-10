@@ -1,7 +1,7 @@
 ---
-title: "Cargo Feature Flags for Interprocess"
+title: "Cargo Feature Flags Reference for the Interprocess Crate"
 sidebarTitle: "Feature Flags"
-description: "Configure Interprocess with Cargo feature flags. Enable the tokio feature for async support or doc_cfg for documentation builds with nightly cfg annotations."
+description: "Configure Interprocess with Cargo feature flags. Enable tokio for async IPC support or doc_cfg for documentation builds with nightly cfg annotations."
 ---
 
 Interprocess uses Cargo feature flags to keep the dependency tree minimal. **All features are off by default**, so you only pull in dependencies for the capabilities you actually use. The table below describes every available feature, its purpose, and its downstream effects.
@@ -10,8 +10,8 @@ Interprocess uses Cargo feature flags to keep the dependency tree minimal. **All
 
 | Feature    | Description                                                                                                   | Enables                              |
 |------------|---------------------------------------------------------------------------------------------------------------|--------------------------------------|
-| `tokio`    | Enables async-native local socket and unnamed pipe types backed by the [Tokio](https://tokio.rs/) runtime.    | `dep:tokio` (with `sync`, `rt`, `net`, `time`, `io-util`, `macros`), `async` |
-| `async`    | Internal feature enabled transitively when `tokio` is enabled. Pulls in `futures-core`. Not intended for direct use. | `futures-core`                  |
+| `tokio`    | Enables async-native local socket and unnamed pipe types backed by the [Tokio](https://tokio.rs/) runtime.    | `dep:tokio` (with `sync`, `rt`, `net`, `time`, `io-util`, `macros`; on Windows: `sync`, `rt`, `fs`, `time`, `io-util`), `async` |
+| `async`    | Enables the async I/O variants of local socket and unnamed pipe types. Activated automatically by `tokio`. Can be enabled directly to depend on `futures-core` without pulling in the full Tokio runtime. | `futures-core`                  |
 | `doc_cfg`  | Enables the nightly-only `#[doc(cfg(...))]` annotations so platform-specific items are labelled on docs.rs.  | *(no extra dependencies)*            |
 
 ### `tokio`
@@ -22,10 +22,11 @@ runtime. When enabled, the following additional types become available:
 - Async variants of `LocalSocketStream` and `LocalSocketListener` (via Tokio's async I/O traits)
 - Async unnamed pipe reader/writer types
 
-The feature activates `tokio` with a carefully chosen minimal subset of its feature flags:
+The feature activates `tokio` with a carefully chosen minimal subset of its feature flags. The
+exact subset differs by target platform:
 
 ```toml
-# What Interprocess activates internally
+# Non-Windows: what Interprocess activates internally
 tokio = { version = "1.36.0", features = [
     "sync",
     "rt",
@@ -34,13 +35,24 @@ tokio = { version = "1.36.0", features = [
     "io-util",
     "macros",
 ] }
+
+# Windows: the named-pipe backend uses file-system handles rather than network sockets,
+# so "net" and "macros" are replaced by "fs"
+tokio = { version = "1.36.0", features = [
+    "sync",
+    "rt",
+    "fs",
+    "time",
+    "io-util",
+] }
 ```
 
 ### `async`
 
-This feature is an implementation detail used to share code between potential future async backends.
-It is activated automatically when `tokio` is enabled. **Do not enable it directly** — its
-behaviour is unspecified and may change without a semver-bump.
+This feature enables the async I/O variants of local socket and unnamed pipe types. It is activated
+automatically when `tokio` is enabled, but can also be enabled on its own if you want to depend on
+`futures-core` without pulling in the full Tokio runtime (for example, when writing a library crate
+that accepts generic async executors).
 
 ### `doc_cfg`
 

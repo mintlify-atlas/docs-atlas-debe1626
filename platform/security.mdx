@@ -1,5 +1,5 @@
 ---
-title: "Security and Access Control in Interprocess"
+title: "Security and Access Control in the Interprocess Crate"
 sidebarTitle: "Security"
 description: "Understand peer credential verification and Windows security descriptors in Interprocess for authentication and access control in IPC applications."
 ---
@@ -82,18 +82,13 @@ for stream in listener.incoming().flatten() {
 
 On Windows the kernel exposes a much narrower set of peer credentials. The `PeerCreds` struct
 contains only the **process ID** of the connecting client — there is no UID or GID concept in the
-Win32 security model.
+Win32 security model. Only one method is available on the Windows `PeerCreds`:
 
 ```rust
-// Windows PeerCreds — only pid() is available
-pub struct PeerCreds {
-    pub(crate) pid: u32,
-}
-
 impl PeerCreds {
-    pub fn pid(&self) -> Option<u32> {
-        Some(self.pid)
-    }
+    /// Returns the process ID of the connecting peer.
+    /// Always returns `Some` on Windows.
+    pub fn pid(&self) -> Option<u32>;
 }
 ```
 

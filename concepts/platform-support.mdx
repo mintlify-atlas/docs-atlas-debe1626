@@ -1,7 +1,7 @@
 ---
-title: "Platform Support Levels in Interprocess"
+title: "OS Platform Support Levels in the Interprocess Crate"
 sidebarTitle: "Platform Support"
-description: "Interprocess defines four support tiers for operating systems: explicit support with CI, explicit with partial CI, explicit without CI, and support by association."
+description: "Interprocess defines five OS support levels: explicit with CI, explicit with partial CI, explicit without CI, support by association, and assumed support."
 ---
 
 Interprocess is designed to work across all major operating systems, but not all platforms receive the same level of testing and maintenance attention. To be transparent about this, Interprocess defines **five named support levels** — deliberately not called *tiers* to avoid confusion with [Rust target tiers](https://doc.rust-lang.org/nightly/rustc/target-tier-policy.html), which work completely differently. Promoting a platform to a higher level is a non-breaking change that can happen in any minor or patch release. Demoting a platform would be a breaking change and is not expected to happen in normal circumstances.

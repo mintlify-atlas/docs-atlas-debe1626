@@ -1,7 +1,7 @@
 ---
-title: "PeerCreds: Peer Credential Verification API"
+title: "PeerCreds: Peer Credential Verification API Reference"
 sidebarTitle: "PeerCreds"
-description: "Reference for the PeerCreds type in Interprocess, providing access to the PID, UID, and GID of the connected peer for authentication on supported platforms."
+description: "Reference for PeerCreds in Interprocess: access the PID, UID, and GID of the connected peer for authentication on supported platforms."
 ---
 
 `PeerCreds` provides access to the OS-level identity of the remote side of a local socket connection. The OS records the credentials of each connecting process at connection time, allowing the receiving side to verify who it is talking to without requiring any in-band authentication protocol. This is considerably more trustworthy than user-supplied identity claims, but not without caveats — see [Security Considerations](#security-considerations) below.

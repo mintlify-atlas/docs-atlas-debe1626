@@ -1,7 +1,7 @@
 ---
-title: "Local Sockets: The Flagship IPC Primitive"
+title: "Local Sockets: Interprocess's Flagship IPC Primitive"
 sidebarTitle: "Local Sockets"
-description: "Understand how Interprocess local sockets work, how they dispatch to platform-specific backends, and why they outperform localhost TCP connections."
+description: "Understand how Interprocess local sockets work, how they dispatch to platform backends, and why they outperform localhost TCP connections."
 ---
 
 Local sockets are the recommended IPC primitive in Interprocess and the best starting point for any two processes that need to talk to each other on the same machine. They provide a socket-like interface — a server listens for incoming connections, each client gets a private bidirectional stream — while offering significantly better performance than `localhost` TCP sockets, along with developer-friendly identifiers and built-in peer authentication.
@@ -52,10 +52,9 @@ For full details on name types, platform-specific behavior, and choosing between
 
 Every connected `Stream` exposes a `peer_creds()` method (from the `StreamCommon` trait) that returns a `PeerCreds` struct describing the other side of the connection:
 
-- **All platforms**: `pid()` — the process ID of the peer (subject to race conditions if the peer's handle is leaked).
-- **Unix** (`ucred`-based platforms: Linux, Android, OpenBSD, Fuchsia, Redox): `euid()` and `egid()` — effective user and group IDs.
-- **Unix** (`xucred`-based platforms: FreeBSD, DragonFly BSD, macOS, iOS, tvOS, watchOS): `euid()` and `groups()` — effective user ID and supplementary groups.
-- **NetBSD**: `euid()` and `egid()`.
+- **`pid()`** — the process ID of the peer (subject to race conditions if the peer's handle is leaked). Available on: Windows, `ucred`-based platforms (Linux, Android, OpenBSD, Fuchsia, Redox), FreeBSD, and NetBSD. **Not** available on DragonFly BSD, macOS, iOS, tvOS, or watchOS.
+- **`euid()` and `egid()`** — effective user and group IDs. Available on `ucred`-based platforms (Linux, Android, OpenBSD, Fuchsia, Redox) and NetBSD.
+- **`euid()` and `groups()`** — effective user ID and supplementary groups. Available on `xucred`-based platforms (FreeBSD, DragonFly BSD, macOS, iOS, tvOS, watchOS).
 
 ```rust
 use interprocess::local_socket::prelude::*;
@@ -82,9 +81,9 @@ This brings in `NameType`, `ToFsName`, `ToNsName`, `Listener`, `ListenerExt`, `S
 
 <Note>
   The `Listener`, `Stream`, `RecvHalf`, and `SendHalf` enum types deliberately **do not** implement
-  `{As,Into,From}Raw{Handle,Fd}`, `As{Handle,Fd}`, or `From<Owned{Handle,Fd}>`. To access those
-  trait implementations on the underlying platform type, you must match on the enum variant
-  explicitly.
+  `{As,Into,From}Raw{Handle,Fd}`, `As{Handle,Fd}`, `From<Owned{Handle,Fd}>`, or
+  `Into<Owned{Handle,Fd}>`. To access those trait implementations on the underlying platform type,
+  you must match on the enum variant explicitly.
 
   ```rust
   # #[cfg(unix)]

@@ -1,7 +1,7 @@
 ---
-title: "Stream, ConnectOptions, and RecvHalf/SendHalf API"
+title: "Stream, ConnectOptions, and RecvHalf/SendHalf APIs"
 sidebarTitle: "Stream"
-description: "Reference for the Stream type and traits in Interprocess local_socket, including connect, split, timeouts, nonblocking mode, and the ConnectOptions builder."
+description: "Reference for Stream and traits in Interprocess local_socket, including connect, split, timeouts, nonblocking mode, and the ConnectOptions builder."
 ---
 
 `Stream` is the bidirectional byte-stream connection type used by both local socket clients (connecting to a server) and by server-accepted connections returned from `Listener::accept`. Like `Listener`, `Stream` is an enum dispatcher: on Windows it wraps a named pipe stream; on Unix it wraps a Unix-domain socket. Clients are created via [`ConnectOptions`](#connectoptions) or the `Stream::connect` shorthand. Server-side connections are obtained from [`Listener::accept`](/api/local-socket/listener#accept).
@@ -293,26 +293,26 @@ if let Some(pid) = creds.pid() {
 ### `traits::RecvHalf`
 
 ```rust
-pub trait RecvHalf: Read + Send + Sync {
+pub trait RecvHalf: Read + Send + Sync + Sized + 'static {
     type Stream: Stream;
 
     fn set_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
 }
 ```
 
-`RecvHalf` implements `std::io::Read` (by value and by `&` reference). Use `set_timeout` to limit how long a read blocks.
+`RecvHalf` implements `std::io::Read` both by value and by `&` reference (via the `RefRead` internal bound). Use `set_timeout` to limit how long a read blocks.
 
 ### `traits::SendHalf`
 
 ```rust
-pub trait SendHalf: Write + Send + Sync {
+pub trait SendHalf: Write + Send + Sync + Sized + 'static {
     type Stream: Stream;
 
     fn set_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
 }
 ```
 
-`SendHalf` implements `std::io::Write` (by value and by `&` reference). Use `set_timeout` to limit how long a write blocks.
+`SendHalf` implements `std::io::Write` both by value and by `&` reference (via the `RefWrite` internal bound). Use `set_timeout` to limit how long a write blocks.
 
 ---
 

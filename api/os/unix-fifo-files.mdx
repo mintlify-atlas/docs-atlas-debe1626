@@ -1,5 +1,5 @@
 ---
-title: "os::unix::fifo_file: FIFO File Creation API"
+title: "FIFO File Creation API: os::unix::fifo_file Module"
 sidebarTitle: "FIFO Files"
 description: "API reference for os::unix::fifo_file::create_fifo, the Interprocess function for creating FIFO files (Unix named pipes) at a given filesystem path."
 ---
@@ -26,8 +26,8 @@ Creates a FIFO special file at the given filesystem path with the given Unix per
   The filesystem path at which the FIFO file will be created. The parent directory must exist. This can be any type that implements `AsRef<std::path::Path>`, including `&str`, `String`, `PathBuf`, and `&Path`.
 </ParamField>
 
-<ParamField path="mode" type="mode_t" required>
-  Unix permission bits for the new FIFO file (e.g. `0o666` or `0o777`). The actual permissions applied will be the result of `mode & ~umask`, where `umask` is the calling process's current file creation mask. It is usually safe to pass `0o777` and let the `umask` narrow the permissions as configured by the user or system.
+<ParamField path="mode" type="libc::mode_t (u32)" required>
+  Unix permission bits for the new FIFO file (e.g. `0o666` or `0o777`). The type is `libc::mode_t`, a C type alias for `u32` on most platforms. The actual permissions applied will be the result of `mode & ~umask`, where `umask` is the calling process's current file creation mask. It is usually safe to pass `0o777` and let the `umask` narrow the permissions as configured by the user or system.
 </ParamField>
 
 ### Returns
